@@ -29,13 +29,14 @@ const C = {
 
 // ---------- estilos compartidos ----------
 const S = {
-  app: { minHeight: "100vh", background: C.bg, color: C.text, paddingBottom: 110 },
+  app: { minHeight: "100vh", background: C.bg, color: C.text, paddingBottom: 180 },
   container: { maxWidth: 480, margin: "0 auto", position: "relative" },
   header: { padding: "18px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, background: C.bg, zIndex: 10 },
   h1: { fontSize: 22, fontWeight: 700, margin: 0, flex: 1, color: C.text },
   card: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 16, margin: "12px 16px", boxShadow: C.shadow },
   btn: (bg, h = 64) => ({ width: "100%", padding: 16, fontSize: 15, fontWeight: 700, border: "none", borderRadius: 12, color: "white", background: bg, cursor: "pointer", minHeight: h, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, boxShadow: "0 2px 6px rgba(37,99,235,0.25)" }),
   thumb: { position: "fixed", bottom: 0, left: 0, right: 0, background: C.surface, borderTop: `1px solid ${C.border}`, padding: 12, display: "flex", gap: 8, zIndex: 50, paddingBottom: "calc(12px + env(safe-area-inset-bottom))", boxShadow: C.shadowLg },
+  thumbAboveTabs: { position: "fixed", bottom: "calc(64px + env(safe-area-inset-bottom))", left: 0, right: 0, background: C.surface, borderTop: `1px solid ${C.border}`, padding: 12, display: "flex", gap: 8, zIndex: 49, boxShadow: C.shadowLg },
   thumbInner: { maxWidth: 480, margin: "0 auto", display: "flex", gap: 8, width: "100%" },
   tabBar: { position: "fixed", bottom: 0, left: 0, right: 0, background: C.surface, borderTop: `1px solid ${C.border}`, display: "flex", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)", boxShadow: C.shadowLg },
   tabInner: { maxWidth: 480, margin: "0 auto", display: "flex", width: "100%" },
@@ -248,7 +249,7 @@ function HomeScreen({ invoices, routes, consumoMedio, active, onNew, onContinue 
         </div>
       )}
 
-      <div style={S.thumb}>
+      <div style={S.thumbAboveTabs}>
         <div style={S.thumbInner}>
           <button onClick={onNew} style={S.btn(C.success)}><Play size={24} />Iniciar nueva ruta</button>
         </div>
