@@ -1,9 +1,9 @@
 // dataApi.js - Capa offline-first sobre IndexedDB.
-// API: init / getAll / get / put / remove / getSettings / saveSettings / uid / sha256
+// API: init / getAll / get / put / remove / getSettings / saveSettings / uid / sha256 / exportAll / importAll
 
 const DB_NAME = "truckerpro";
-const DB_VERSION = 2;
-const TABLES = ["routes", "expenses", "invoices", "ecmrs", "clients", "vehicles"];
+const DB_VERSION = 3;
+const TABLES = ["routes", "expenses", "invoices", "ecmrs", "clients", "vehicles", "payments"];
 
 let _db = null;
 
@@ -34,12 +34,13 @@ const wrap = (req) =>
   });
 
 const DEFAULT_SETTINGS = {
-  // Datos del emisor (camionero)
+  // Datos del emisor
   nombre: "",
   nif: "",
   direccion: "",
   cp: "",
   ciudad: "",
+  telefono: "",
   // Vehículos fijos
   tractora: "",
   remolque: "",
@@ -48,10 +49,15 @@ const DEFAULT_SETTINGS = {
   ejercicio: new Date().getFullYear(),
   iva: 21,
   irpf: 1,
+  iban: "",
   formaPago: "Transferencia",
   observaciones: "Se adjuntan albaranes sellados.",
+  registro: "",
+  diasVencimiento: 30,
   // Alertas
   margenAlerta: 20,
+  // UI
+  theme: "light", // "light" | "dark"
 };
 
 export const dataApi = {
@@ -73,5 +79,25 @@ export const dataApi = {
   async sha256(msg) {
     const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(msg));
     return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  },
+
+  async exportAll() {
+    const data = { _app: "TruckerPro", _version: DB_VERSION, _exportedAt: new Date().toISOString() };
+    for (const t of TABLES) data[t] = await this.getAll(t);
+    data.settings = await this.getSettings();
+    return data;
+  },
+
+  async importAll(data) {
+    if (!data || data._app !== "TruckerPro") throw new Error("Archivo no válido");
+    for (const t of TABLES) {
+      const store = await tx(t, "readwrite");
+      await wrap(store.clear());
+      if (Array.isArray(data[t])) {
+        for (const row of data[t]) await wrap(store.put(row));
+      }
+    }
+    if (data.settings) await this.saveSettings(data.settings);
+    return true;
   },
 };
