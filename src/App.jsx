@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { Truck, Play, Fuel, Receipt, CheckCircle, FileText, AlertTriangle, ArrowLeft, Home as HomeIcon, Settings as SettingsIcon, Trash2, Edit3, X, Users, Plus, Download } from "lucide-react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { Truck, Fuel, Receipt, CheckCircle, FileText, AlertTriangle, ArrowLeft, Home as HomeIcon, Settings as SettingsIcon, Trash2, Edit3, X, Users, Plus, Download, Search } from "lucide-react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { dataApi } from "./dataApi.js";
 
-const eur = (n) => (Number(n) || 0).toFixed(2) + " €";
+const eur = (n) => (Number(n) || 0).toFixed(2).replace(".", ",") + " €";
+const eurShort = (n) => { const v = Number(n) || 0; return v >= 1000 ? v.toLocaleString("es-ES", { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + " €" : v.toFixed(2).replace(".", ",") + " €"; };
 const fmtDate = (iso) => new Date(iso).toLocaleDateString("es-ES");
 const fmtShort = (iso) => { const d = new Date(iso); return `${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()}`; };
 
@@ -26,7 +27,6 @@ const S = {
   input: { width: "100%", padding: 14, fontSize: 16, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 10, color: C.text, marginBottom: 10, outline: "none" },
   label: { fontSize: 13, color: C.textMuted, display: "block", marginTop: 8, marginBottom: 4, fontWeight: 600 },
   stat: { display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${C.border}`, fontSize: 14, color: C.text },
-  sectionTitle: { fontSize: 12, color: C.textLight, textTransform: "uppercase", marginTop: 16, marginBottom: 4, fontWeight: 700, padding: "0 16px" },
 };
 
 function Header({ title, onBack, action }) {
@@ -54,102 +54,160 @@ function Confirm({ msg, onYes, onNo }) {
   );
 }
 
-// =====================================================================
-// PDF GENERATOR
-// =====================================================================
+function AutoInput({ value, onChange, suggestions, placeholder, type = "text" }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  const filtered = useMemo(() => {
+    const v = (value || "").toLowerCase().trim();
+    if (!v) return suggestions.slice(0, 8);
+    return suggestions.filter(s => s.toLowerCase().includes(v)).slice(0, 8);
+  }, [value, suggestions]);
+
+  useEffect(() => {
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  return (
+    <div ref={ref} style={{ position: "relative", marginBottom: 10 }}>
+      <input style={{ ...S.input, marginBottom: 0 }} type={type} value={value || ""} placeholder={placeholder}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }} />
+      {open && filtered.length > 0 && (
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 20px rgba(15,23,42,0.15)", zIndex: 20, marginTop: 4, maxHeight: 220, overflowY: "auto" }}>
+          {filtered.map((s, i) => (
+            <div key={i} onMouseDown={() => { onChange(s); setOpen(false); }} style={{ padding: "12px 14px", cursor: "pointer", fontSize: 14, borderBottom: i < filtered.length - 1 ? `1px solid ${C.border}` : "none" }}>{s}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- PDF ----------
 function generateInvoicePDF(invoice, settings, client, lines) {
-  const doc = new jsPDF();
+  const doc = new jsPDF({ unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const M = 14;
 
-  // Cabecera emisor
   doc.setFont("helvetica", "bold").setFontSize(14);
-  doc.text((settings.nombre || "EMISOR").toUpperCase(), 14, 18);
+  doc.text((settings.nombre || "EMISOR").toUpperCase(), M, 20);
   doc.setFont("helvetica", "normal").setFontSize(9);
-  doc.text(`NIF: ${settings.nif || ""}`, 14, 24);
-  doc.text(settings.direccion || "", 14, 29);
-  doc.text(`${settings.cp || ""}  ${(settings.ciudad || "").toUpperCase()}`, 14, 34);
+  doc.text(settings.nif || "", M, 26);
+  doc.text(settings.direccion || "", M, 31);
+  doc.text(`${settings.cp || ""}  ${(settings.ciudad || "").toUpperCase()}`, M, 36);
+  if (settings.telefono) doc.text(settings.telefono, M, 41);
 
-  // Dirección de envío (cliente)
   doc.setFont("helvetica", "bold").setFontSize(10);
-  doc.text("Dirección de Envío:", 120, 24);
+  doc.text("Dirección de Envío:", 120, 26);
   doc.setFont("helvetica", "normal").setFontSize(9);
-  doc.text(client.razon || "", 120, 29);
-  doc.text(`C.I.F ${client.nif || ""}`, 120, 34);
-  doc.text(client.direccion || "", 120, 39);
-  doc.text(`${client.cp || ""} ${(client.ciudad || "").toUpperCase()}`, 120, 44);
+  doc.text((client.razon || "").toUpperCase(), 120, 31);
+  doc.text(`C.I.F ${client.nif || ""}`, 120, 36);
+  doc.text(client.direccion || "", 120, 41);
+  doc.text(`${client.cp || ""} ${(client.ciudad || "").toUpperCase()}`, 120, 46);
 
-  // Cuadro Factura/Fecha
-  doc.rect(14, 42, 90, 18);
-  doc.setFont("helvetica", "bold").setFontSize(10);
-  doc.text("FACTURA", 16, 48);
-  doc.text("FECHA", 16, 54);
-  doc.text("FORMA DE PAGO", 16, 60);
-  doc.setFont("helvetica", "normal");
-  doc.text(invoice.numero, 50, 48);
-  doc.text(fmtDate(invoice.fecha), 50, 54);
-  doc.text(settings.formaPago || "", 50, 60);
-
-  // Datos del cliente
+  const boxY = 48, boxH = 22, boxW = 100;
+  doc.setLineWidth(0.4).rect(M, boxY, boxW, boxH);
+  doc.setLineWidth(0.2);
+  doc.line(M, boxY + 5.5, M + boxW, boxY + 5.5);
+  doc.line(M, boxY + 11, M + boxW, boxY + 11);
+  doc.line(M, boxY + 16.5, M + boxW, boxY + 16.5);
   doc.setFont("helvetica", "bold").setFontSize(9);
-  doc.text("DATOS DEL CLIENTE:", 14, 70);
+  doc.text("FACTURA", M + 2, boxY + 4);
+  doc.text("FECHA", M + 2, boxY + 9.5);
+  doc.text("VENCIMIENTO", M + 2, boxY + 15);
+  doc.text("FORMA DE PAGO", M + 2, boxY + 20.5);
   doc.setFont("helvetica", "normal");
-  doc.text(`C.I.F ${client.nif || ""}    ${client.razon || ""}`, 14, 75);
-  doc.text(client.direccion || "", 14, 80);
-  doc.text(`${client.cp || ""} ${(client.ciudad || "").toUpperCase()}`, 14, 85);
+  doc.text(invoice.numero, M + 32, boxY + 4);
+  doc.text(fmtDate(invoice.fecha), M + 32, boxY + 9.5);
 
-  // Tabla de líneas
+  doc.setFontSize(9).text("pag. 1", pageW - M, boxY + boxH + 4, { align: "right" });
+
+  const cliY = boxY + boxH + 6;
+  doc.setFont("helvetica", "bold").setFontSize(9);
+  doc.text("DATOS DEL CLIENTE :", M, cliY);
+  doc.setFont("helvetica", "normal");
+  doc.text(`C.I.F ${client.nif || ""}`, M, cliY + 5);
+  doc.text((client.razon || "").toUpperCase(), M + 40, cliY + 5);
+  doc.text(client.direccion || "", M, cliY + 10);
+  doc.text(`${client.cp || ""} ${(client.ciudad || "").toUpperCase()}`, M, cliY + 15);
+
   autoTable(doc, {
-    startY: 92,
-    head: [["FECHA", "EXPED.", "ORIGEN/DESTINO", "TRACTORA", "REMOLQUE", "IMPORTE"]],
+    startY: cliY + 20,
+    head: [["FECHA", "EXPED.", "ORIGEN/ DESTINO", "TRACTORA", "REMOLQUE", "IMPORTE"]],
     body: lines.map(l => [
       fmtShort(l.fecha || invoice.fecha),
       l.expediente || "",
-      `${l.origen} → ${l.destino}`,
+      `${(l.origen || "").toUpperCase()} → ${(l.destino || "").toUpperCase()}`,
       l.tractora || settings.tractora || "",
       l.remolque || settings.remolque || "",
-      Number(l.precio).toFixed(2),
+      Number(l.precio).toFixed(0),
     ]),
     theme: "grid",
-    headStyles: { fillColor: [240, 240, 240], textColor: 0, fontStyle: "bold", fontSize: 9 },
-    bodyStyles: { fontSize: 9 },
-    columnStyles: { 5: { halign: "right" } },
-    margin: { left: 14, right: 14 },
+    headStyles: { fillColor: [255, 255, 255], textColor: 0, fontStyle: "bold", fontSize: 9, lineWidth: 0.3, lineColor: [0, 0, 0], halign: "left" },
+    bodyStyles: { fontSize: 9, lineWidth: 0.2, lineColor: [0, 0, 0], minCellHeight: 6 },
+    columnStyles: { 0: { cellWidth: 20 }, 1: { cellWidth: 18 }, 2: { cellWidth: 70 }, 3: { cellWidth: 25 }, 4: { cellWidth: 25 }, 5: { cellWidth: 24, halign: "right" } },
+    margin: { left: M, right: M },
   });
 
-  // Totales abajo a la derecha
-  const finalY = doc.lastAutoTable.finalY + 10;
-  const labelX = 120, valueX = pageW - 16;
+  const finalY = doc.lastAutoTable.finalY;
+  const tableBottomY = 200;
+  if (finalY < tableBottomY) {
+    doc.setLineWidth(0.3);
+    const xs = [M, M + 20, M + 38, M + 108, M + 133, M + 158, M + 182];
+    xs.forEach(x => doc.line(x, finalY, x, tableBottomY));
+    doc.line(M, tableBottomY, M + 182, tableBottomY);
+  }
+
+  const bottomY = tableBottomY + 6;
+  doc.setFont("helvetica", "bold").setFontSize(9);
+  doc.text("Forma de Pago:", M, bottomY);
+  doc.setFont("helvetica", "normal");
+  doc.text(` ${settings.iban || settings.formaPago || ""}`, M + 26, bottomY);
+  doc.setFont("helvetica", "bold");
+  doc.text("Observaciones:", M, bottomY + 5);
+  doc.setFont("helvetica", "normal");
+  doc.text(` ${settings.observaciones || ""}`, M + 26, bottomY + 5);
+
+  const totalX = 120, valueX = pageW - M;
   doc.setFont("helvetica", "bold").setFontSize(10);
+  doc.text("SUMA IMPORTES", totalX, bottomY);
+  doc.setLineWidth(0.3).rect(valueX - 22, bottomY - 4, 22, 6);
+  doc.text(eurShort(invoice.base), valueX - 2, bottomY, { align: "right" });
 
-  const rows = [
-    ["SUMA IMPORTES", eur(invoice.base)],
-    ["DESCUENTO", eur(0)],
-    ["BASE IMPONIBLE", eur(invoice.base)],
-    [`I.R.P.F   ${invoice.irpfPct}%`, eur(invoice.irpfImporte)],
-    [`I.V.A.    ${invoice.ivaPct}%`, eur(invoice.cuota)],
-    ["TOTAL FACTURA", eur(invoice.total)],
-  ];
-  rows.forEach((r, i) => {
-    const y = finalY + i * 7;
-    doc.text(r[0], labelX, y);
-    doc.text(r[1], valueX, y, { align: "right" });
-  });
+  doc.text("DESCUENTO", totalX, bottomY + 7);
 
-  // Observaciones
-  doc.setFont("helvetica", "normal").setFontSize(9);
-  doc.text(`Forma de Pago: ${settings.formaPago || ""}`, 14, finalY);
-  if (settings.observaciones) doc.text(`Observaciones: ${settings.observaciones}`, 14, finalY + 6);
+  doc.setLineWidth(0.5).rect(valueX - 22, bottomY + 10, 22, 6);
+  doc.text("BASE IMPONIBLE", totalX, bottomY + 14);
+  doc.text(eurShort(invoice.base), valueX - 2, bottomY + 14, { align: "right" });
 
-  // Hash VeriFactu
-  doc.setFontSize(7).setTextColor(120);
-  doc.text(`VeriFactu hash: ${invoice.hash}`, 14, finalY + 50);
+  doc.setLineWidth(0.2);
+  doc.setFont("helvetica", "bold").setFontSize(9);
+  doc.text("I.R.P.F", totalX, bottomY + 21);
+  doc.setFont("helvetica", "normal");
+  doc.text(`${invoice.irpfPct}%`, totalX + 22, bottomY + 21);
+  doc.text(eur(invoice.irpfImporte), valueX - 2, bottomY + 21, { align: "right" });
 
-  doc.save(`Factura_${invoice.numero}.pdf`);
+  doc.setFont("helvetica", "bold");
+  doc.text("I.V.A.", totalX, bottomY + 27);
+  doc.setFont("helvetica", "normal");
+  doc.text(`${invoice.ivaPct}%`, totalX + 22, bottomY + 27);
+  doc.text(eur(invoice.cuota), valueX - 2, bottomY + 27, { align: "right" });
+
+  doc.setFont("helvetica", "bold").setFontSize(11);
+  doc.text("TOTAL FACTURA", totalX, bottomY + 35);
+  doc.text(eurShort(invoice.total), valueX - 2, bottomY + 35, { align: "right" });
+
+  doc.setFont("helvetica", "normal").setFontSize(7);
+  if (settings.registro) doc.text(settings.registro, M, pageH - 15);
+  doc.setFontSize(6).setTextColor(120);
+  doc.text(`VeriFactu hash: ${invoice.hash}`, M, pageH - 8);
+
+  doc.save(`Factura_${invoice.numero.replace(/\//g, "-")}.pdf`);
 }
 
-// =====================================================================
-// APP
-// =====================================================================
 export default function App() {
   const [ready, setReady] = useState(false);
   const [routes, setRoutes] = useState([]);
@@ -157,7 +215,6 @@ export default function App() {
   const [invoices, setInvoices] = useState([]);
   const [clients, setClients] = useState([]);
   const [settings, setSettings] = useState(null);
-
   const [screen, setScreen] = useState("home");
   const [activeId, setActiveId] = useState(null);
   const [editing, setEditing] = useState(null);
@@ -185,6 +242,13 @@ export default function App() {
     setClients(await dataApi.getAll("clients"));
   }, []);
 
+  const suggestions = useMemo(() => ({
+    origenes: [...new Set(routes.map(r => r.origen).filter(Boolean))].sort(),
+    destinos: [...new Set(routes.map(r => r.destino).filter(Boolean))].sort(),
+    expedientes: [...new Set(routes.map(r => r.expediente).filter(Boolean))].sort(),
+    clientesNombres: [...new Set(routes.map(r => r.cliente).filter(Boolean))].sort(),
+  }), [routes]);
+
   const active = routes.find(r => r.id === activeId) || routes.find(r => r.estado === "in_progress");
   const expensesOf = (rid) => expenses.filter(e => e.routeId === rid);
   const totals = (r) => {
@@ -193,7 +257,6 @@ export default function App() {
     const b = Number(r.precio) - g;
     return { gastos: g, beneficio: b, margen: r.precio > 0 ? (b / r.precio) * 100 : 0 };
   };
-
   const consumoMedio = useMemo(() => {
     const rf = expenses.filter(e => e.tipo === "fuel" && e.litros && e.km).sort((a, b) => a.km - b.km);
     if (rf.length < 2) return null;
@@ -202,23 +265,13 @@ export default function App() {
     return k > 0 ? (l * 100 / k).toFixed(2) : null;
   }, [expenses]);
 
-  // ---- acciones ----
-  const startRoute = async (data) => {
-    const r = await dataApi.put("routes", { ...data, precio: Number(data.precio), km: Number(data.km || 0), peso: Number(data.peso || 0), estado: "delivered", fecha: data.fecha || new Date().toISOString(), inicio: new Date().toISOString() });
-    await reload();
-    setScreen("home");
-  };
-  const updateRoute = async (data) => {
-    await dataApi.put("routes", { ...editing, ...data, precio: Number(data.precio), km: Number(data.km || 0), peso: Number(data.peso || 0) });
-    setEditing(null); await reload(); setScreen("routesList");
-  };
+  const startRoute = async (data) => { await dataApi.put("routes", { ...data, precio: Number(data.precio), km: Number(data.km || 0), peso: Number(data.peso || 0), estado: "delivered", fecha: data.fecha || new Date().toISOString(), inicio: new Date().toISOString() }); await reload(); setScreen("home"); };
+  const updateRoute = async (data) => { await dataApi.put("routes", { ...editing, ...data, precio: Number(data.precio), km: Number(data.km || 0), peso: Number(data.peso || 0) }); setEditing(null); await reload(); setScreen("routesList"); };
   const removeRoute = async (id) => { await dataApi.remove("routes", id); await reload(); setConfirm(null); };
   const addExpense = async (data) => { await dataApi.put("expenses", { routeId: active.id, fecha: new Date().toISOString(), ...data, importe: Number(data.importe), litros: data.litros ? Number(data.litros) : null, km: data.km ? Number(data.km) : null }); await reload(); setModal(null); };
   const removeExpense = async (id) => { await dataApi.remove("expenses", id); await reload(); setConfirm(null); };
-
   const saveClient = async (data) => { await dataApi.put("clients", { ...editingClient, ...data }); setEditingClient(null); await reload(); setScreen("clients"); };
   const removeClient = async (id) => { await dataApi.remove("clients", id); await reload(); setConfirm(null); };
-
   const saveSettings = async (s) => { const saved = await dataApi.saveSettings(s); setSettings(saved); setScreen("home"); };
 
   const emitInvoice = async (clientId, routeIds) => {
@@ -230,29 +283,17 @@ export default function App() {
     const irpfImporte = +(base * irpfPct / 100).toFixed(2);
     const cuota = +(base * ivaPct / 100).toFixed(2);
     const total = +(base - irpfImporte + cuota).toFixed(2);
-
     const numero = `${settings.serie}-${String(invoices.length + 1).padStart(3, "0")}/${settings.ejercicio}`;
     const fecha = new Date().toISOString();
     const sorted = [...invoices].sort((a, b) => a.numero.localeCompare(b.numero));
     const prevHash = sorted.length ? sorted[sorted.length - 1].hash : "0".repeat(64);
     const payload = `${numero}|${fecha.slice(0, 10)}|${settings.nif}|${client.nif}|${base}|${cuota}|${total}|${prevHash}`;
     const hash = await dataApi.sha256(payload);
-
-    const inv = await dataApi.put("invoices", {
-      numero, fecha, clientId, lineRouteIds: routeIds,
-      base, irpfPct, irpfImporte, ivaPct, cuota, total,
-      hashAnterior: prevHash, hash, estado: "issued", inmutable: true,
-    });
-
-    // Marcar rutas como facturadas
-    for (const r of lines) {
-      await dataApi.put("routes", { ...r, estado: "invoiced", invoiceId: inv.id });
-    }
+    const inv = await dataApi.put("invoices", { numero, fecha, clientId, lineRouteIds: routeIds, base, irpfPct, irpfImporte, ivaPct, cuota, total, hashAnterior: prevHash, hash, estado: "issued", inmutable: true });
+    for (const r of lines) await dataApi.put("routes", { ...r, estado: "invoiced", invoiceId: inv.id });
     await reload();
     setInvoiceClientId(null);
     setScreen("invoices");
-
-    // Generar PDF inmediatamente
     generateInvoicePDF(inv, settings, client, lines);
   };
 
@@ -268,8 +309,8 @@ export default function App() {
     <div style={S.app}>
       <div style={S.container}>
         {screen === "home" && <HomeScreen invoices={invoices} routes={routes} consumoMedio={consumoMedio} active={active} onNew={() => setScreen("new")} onActive={() => setScreen("active")} onRoutes={() => setScreen("routesList")} />}
-        {screen === "new" && <RouteForm clients={clients} settings={settings} onCancel={() => setScreen("home")} onSubmit={startRoute} />}
-        {screen === "editRoute" && <RouteForm clients={clients} settings={settings} initial={editing} editing onCancel={() => { setEditing(null); setScreen("routesList"); }} onSubmit={updateRoute} />}
+        {screen === "new" && <RouteForm clients={clients} settings={settings} suggestions={suggestions} onCancel={() => setScreen("home")} onSubmit={startRoute} />}
+        {screen === "editRoute" && <RouteForm clients={clients} settings={settings} suggestions={suggestions} initial={editing} editing onCancel={() => { setEditing(null); setScreen("routesList"); }} onSubmit={updateRoute} />}
         {screen === "routesList" && <RoutesListScreen routes={routes} clients={clients} onBack={() => setScreen("home")} onEdit={(r) => { setEditing(r); setScreen("editRoute"); }} onDelete={(id) => setConfirm({ msg: "¿Eliminar esta ruta?", onYes: () => removeRoute(id) })} />}
         {screen === "active" && <ActiveScreen route={active} expenses={expensesOf(active?.id)} totals={totals(active)} margenAlerta={settings.margenAlerta} onBack={() => setScreen("home")} onAddFuel={() => setModal("fuel")} onAddExpense={() => setModal("expense")} onDeleteExpense={(id) => setConfirm({ msg: "¿Eliminar este gasto?", onYes: () => removeExpense(id) })} />}
         {screen === "invoices" && <InvoicesScreen invoices={invoices} clients={clients} onNew={() => setScreen("invoiceClient")} onDownload={downloadInvoice} />}
@@ -279,10 +320,8 @@ export default function App() {
         {screen === "editClient" && <ClientForm initial={editingClient} onCancel={() => { setEditingClient(null); setScreen("clients"); }} onSubmit={saveClient} />}
         {screen === "settings" && <SettingsScreen settings={settings} onSave={saveSettings} onClients={() => setScreen("clients")} />}
       </div>
-
       {modal && <ExpenseModal kind={modal} onCancel={() => setModal(null)} onSave={addExpense} />}
       {confirm && <Confirm msg={confirm.msg} onYes={confirm.onYes} onNo={() => setConfirm(null)} />}
-
       {["home", "invoices", "settings"].includes(screen) && (
         <div style={S.tabBar}>
           <div style={S.tabInner}>
@@ -296,15 +335,11 @@ export default function App() {
   );
 }
 
-// =====================================================================
-// HOME
-// =====================================================================
 function HomeScreen({ invoices, routes, consumoMedio, active, onNew, onActive, onRoutes }) {
   const now = new Date();
   const mes = invoices.filter(i => { const d = new Date(i.fecha); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); });
   const ingresosMes = mes.reduce((s, i) => s + i.base, 0);
   const pendientes = routes.filter(r => r.estado !== "invoiced").length;
-
   return (
     <>
       <Header title="TruckerPro" />
@@ -312,47 +347,37 @@ function HomeScreen({ invoices, routes, consumoMedio, active, onNew, onActive, o
         <div style={{ fontSize: 13, color: C.textMuted }}>Ingresos este mes</div>
         <div style={{ fontSize: 34, fontWeight: 700, color: C.success, marginTop: 4 }}>{eur(ingresosMes)}</div>
         <div style={{ ...S.stat, marginTop: 8 }}><span>Facturas emitidas</span><b>{mes.length}</b></div>
-        <div style={S.stat}><span>Rutas pendientes de facturar</span><b>{pendientes}</b></div>
+        <div style={S.stat}><span>Rutas pendientes</span><b>{pendientes}</b></div>
         <div style={{ ...S.stat, borderBottom: "none" }}><span>Consumo medio</span><b>{consumoMedio ? `${consumoMedio} L/100km` : "—"}</b></div>
       </div>
-
       {active && (
         <div style={{ ...S.card, borderColor: C.primary, borderWidth: 2 }}>
-          <div style={{ fontSize: 12, color: C.primary, fontWeight: 700 }}>RUTA EN CURSO (con gastos)</div>
+          <div style={{ fontSize: 12, color: C.primary, fontWeight: 700 }}>RUTA CON GASTOS ABIERTA</div>
           <div style={{ fontSize: 18, fontWeight: 700, margin: "8px 0" }}>{active.origen} → {active.destino}</div>
           <button onClick={onActive} style={S.btn(C.primary, 52)}>Ver gastos</button>
         </div>
       )}
-
       <div style={S.card}>
         <button onClick={onRoutes} style={{ ...S.btn(C.primary, 52), background: C.surfaceAlt, color: C.text, boxShadow: "none", border: `1px solid ${C.border}` }}>📋 Ver todas las rutas</button>
       </div>
-
-      <div style={S.thumbAbove}>
-        <div style={S.thumbInner}>
-          <button onClick={onNew} style={S.btn(C.success)}><Plus size={24} />Registrar nueva ruta</button>
-        </div>
-      </div>
+      <div style={S.thumbAbove}><div style={S.thumbInner}>
+        <button onClick={onNew} style={S.btn(C.success)}><Plus size={24} />Registrar nueva ruta</button>
+      </div></div>
     </>
   );
 }
 
-// =====================================================================
-// FORMULARIO RUTA
-// =====================================================================
-function RouteForm({ initial, clients, settings, onCancel, onSubmit, editing }) {
+function RouteForm({ initial, clients, settings, suggestions, onCancel, onSubmit, editing }) {
   const today = new Date().toISOString().slice(0, 10);
   const [f, setF] = useState(initial ? { ...initial, fecha: (initial.fecha || initial.inicio || "").slice(0, 10) } : { fecha: today, clientId: "", cliente: "", origen: "", destino: "", expediente: "", km: "", peso: "", precio: "" });
   const [newClient, setNewClient] = useState(false);
   const valid = (f.clientId || (newClient && f.cliente)) && f.origen && f.destino && f.precio;
-
   return (
     <>
       <Header title={editing ? "Editar ruta" : "Nueva ruta"} onBack={onCancel} />
       <div style={{ padding: 16 }}>
         <label style={S.label}>Fecha</label>
         <input style={S.input} type="date" value={f.fecha} onChange={e => setF({ ...f, fecha: e.target.value })} />
-
         <label style={S.label}>Cliente</label>
         {!newClient ? (
           <>
@@ -364,19 +389,20 @@ function RouteForm({ initial, clients, settings, onCancel, onSubmit, editing }) 
           </>
         ) : (
           <>
-            <input style={S.input} placeholder="Nombre del cliente" value={f.cliente} onChange={e => setF({ ...f, cliente: e.target.value, clientId: "" })} />
+            <AutoInput value={f.cliente} onChange={v => setF({ ...f, cliente: v, clientId: "" })} suggestions={suggestions.clientesNombres} placeholder="Nombre del cliente" />
             <button onClick={() => setNewClient(false)} style={{ background: "none", border: "none", color: C.textMuted, fontSize: 13, cursor: "pointer", marginBottom: 8 }}>← Elegir de la lista</button>
           </>
         )}
-
-        <label style={S.label}>Origen</label><input style={S.input} value={f.origen} onChange={e => setF({ ...f, origen: e.target.value })} />
-        <label style={S.label}>Destino</label><input style={S.input} value={f.destino} onChange={e => setF({ ...f, destino: e.target.value })} />
-        <label style={S.label}>Expediente (opcional)</label><input style={S.input} value={f.expediente || ""} onChange={e => setF({ ...f, expediente: e.target.value })} />
+        <label style={S.label}>Origen</label>
+        <AutoInput value={f.origen} onChange={v => setF({ ...f, origen: v })} suggestions={suggestions.origenes} placeholder="Origen" />
+        <label style={S.label}>Destino</label>
+        <AutoInput value={f.destino} onChange={v => setF({ ...f, destino: v })} suggestions={suggestions.destinos} placeholder="Destino" />
+        <label style={S.label}>Expediente (opcional)</label>
+        <AutoInput value={f.expediente} onChange={v => setF({ ...f, expediente: v })} suggestions={suggestions.expedientes} placeholder="Nº expediente" />
         <label style={S.label}>Precio acordado (€)</label><input style={S.input} type="number" inputMode="decimal" value={f.precio} onChange={e => setF({ ...f, precio: e.target.value })} />
         <label style={S.label}>Kilómetros (opcional)</label><input style={S.input} type="number" value={f.km} onChange={e => setF({ ...f, km: e.target.value })} />
         <label style={S.label}>Peso en t (opcional)</label><input style={S.input} type="number" value={f.peso} onChange={e => setF({ ...f, peso: e.target.value })} />
-
-        <div style={{ fontSize: 12, color: C.textMuted, marginTop: 8 }}>Tractora: <b>{settings.tractora || "(configurar en Ajustes)"}</b> · Remolque: <b>{settings.remolque || "(configurar en Ajustes)"}</b></div>
+        <div style={{ fontSize: 12, color: C.textMuted, marginTop: 8 }}>Tractora: <b>{settings.tractora || "(en Ajustes)"}</b> · Remolque: <b>{settings.remolque || "(en Ajustes)"}</b></div>
       </div>
       <div style={S.thumb}><div style={S.thumbInner}>
         <button onClick={() => valid && onSubmit(f)} disabled={!valid} style={{ ...S.btn(valid ? C.success : "#cbd5e1"), opacity: valid ? 1 : 0.7 }}><CheckCircle size={24} />{editing ? "Guardar cambios" : "Registrar ruta"}</button>
@@ -385,9 +411,6 @@ function RouteForm({ initial, clients, settings, onCancel, onSubmit, editing }) 
   );
 }
 
-// =====================================================================
-// LISTADO RUTAS
-// =====================================================================
 function RoutesListScreen({ routes, clients, onBack, onEdit, onDelete }) {
   const sorted = [...routes].sort((a, b) => (b.fecha || "").localeCompare(a.fecha || ""));
   return (
@@ -396,21 +419,16 @@ function RoutesListScreen({ routes, clients, onBack, onEdit, onDelete }) {
       {sorted.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>Sin rutas todavía</div>}
       {sorted.map(r => {
         const c = clients.find(cl => cl.id === r.clientId);
-        const facturada = r.estado === "invoiced";
+        const fact = r.estado === "invoiced";
         return (
-          <div key={r.id} style={{ ...S.card, opacity: facturada ? 0.65 : 1 }}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <b>{r.origen} → {r.destino}</b>
-              <span style={{ color: C.success, fontWeight: 700 }}>{eur(r.precio)}</span>
-            </div>
+          <div key={r.id} style={{ ...S.card, opacity: fact ? 0.65 : 1 }}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}><b>{r.origen} → {r.destino}</b><span style={{ color: C.success, fontWeight: 700 }}>{eur(r.precio)}</span></div>
             <div style={{ fontSize: 12, color: C.textMuted, marginTop: 4 }}>{c?.razon || r.cliente} · {fmtDate(r.fecha || r.inicio)}{r.expediente ? ` · Exp. ${r.expediente}` : ""}</div>
-            <div style={{ fontSize: 11, color: facturada ? C.success : C.warning, marginTop: 4, fontWeight: 600 }}>{facturada ? "✓ Facturada" : "⏳ Pendiente"}</div>
-            {!facturada && (
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button onClick={() => onEdit(r)} style={{ ...S.btn(C.primary, 40), fontSize: 13 }}><Edit3 size={16} />Editar</button>
-                <button onClick={() => onDelete(r.id)} style={{ ...S.btn(C.danger, 40), fontSize: 13 }}><Trash2 size={16} />Borrar</button>
-              </div>
-            )}
+            <div style={{ fontSize: 11, color: fact ? C.success : C.warning, marginTop: 4, fontWeight: 600 }}>{fact ? "✓ Facturada" : "⏳ Pendiente"}</div>
+            {!fact && <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button onClick={() => onEdit(r)} style={{ ...S.btn(C.primary, 40), fontSize: 13 }}><Edit3 size={16} />Editar</button>
+              <button onClick={() => onDelete(r.id)} style={{ ...S.btn(C.danger, 40), fontSize: 13 }}><Trash2 size={16} />Borrar</button>
+            </div>}
           </div>
         );
       })}
@@ -418,9 +436,6 @@ function RoutesListScreen({ routes, clients, onBack, onEdit, onDelete }) {
   );
 }
 
-// =====================================================================
-// RUTA ACTIVA (gastos)
-// =====================================================================
 function ActiveScreen({ route, expenses, totals, margenAlerta, onBack, onAddFuel, onAddExpense, onDeleteExpense }) {
   if (!route) return null;
   const { gastos, beneficio, margen } = totals;
@@ -429,10 +444,7 @@ function ActiveScreen({ route, expenses, totals, margenAlerta, onBack, onAddFuel
   return (
     <>
       <Header title="Gastos de ruta" onBack={onBack} />
-      <div style={S.card}>
-        <div style={{ fontSize: 18, fontWeight: 700 }}>{route.origen} → {route.destino}</div>
-        <div style={{ fontSize: 13, color: C.textMuted, marginTop: 4 }}>{route.cliente}</div>
-      </div>
+      <div style={S.card}><div style={{ fontSize: 18, fontWeight: 700 }}>{route.origen} → {route.destino}</div><div style={{ fontSize: 13, color: C.textMuted, marginTop: 4 }}>{route.cliente}</div></div>
       <div style={{ ...S.card, borderColor: color, borderWidth: 2 }}>
         <div style={S.stat}><span>Precio flete</span><b>{eur(route.precio)}</b></div>
         <div style={S.stat}><span>Gastos</span><b style={{ color: C.danger }}>-{eur(gastos)}</b></div>
@@ -481,15 +493,12 @@ function ExpenseModal({ kind, onCancel, onSave }) {
   );
 }
 
-// =====================================================================
-// FACTURAS
-// =====================================================================
 function InvoicesScreen({ invoices, clients, onNew, onDownload }) {
   const sorted = [...invoices].sort((a, b) => b.numero.localeCompare(a.numero));
   return (
     <>
       <Header title="Facturas" />
-      {sorted.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>Aún no hay facturas. Pulsa el botón verde para crear la primera.</div>}
+      {sorted.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>Aún no hay facturas.</div>}
       {sorted.map(i => {
         const c = clients.find(cl => cl.id === i.clientId);
         return (
@@ -502,7 +511,6 @@ function InvoicesScreen({ invoices, clients, onNew, onDownload }) {
             <div style={{ fontSize: 12, color: C.textLight, marginTop: 4 }}>Base: {eur(i.base)} · IRPF -{eur(i.irpfImporte)} · IVA: {eur(i.cuota)}</div>
             <button onClick={() => onDownload(i)} style={{ ...S.btn(C.primary, 44), marginTop: 10, fontSize: 13 }}><Download size={16} />Descargar PDF</button>
             <div style={{ fontSize: 10, color: C.textLight, marginTop: 8, fontFamily: "monospace", wordBreak: "break-all" }}>🔒 {i.hash.slice(0, 32)}…</div>
-            <div style={{ fontSize: 11, color: C.success, marginTop: 4, fontWeight: 600 }}>✓ Inmutable · Hash encadenado VeriFactu</div>
           </div>
         );
       })}
@@ -514,18 +522,23 @@ function InvoicesScreen({ invoices, clients, onNew, onDownload }) {
 }
 
 function PickClientScreen({ clients, routes, onBack, onPick }) {
+  const [q, setQ] = useState("");
   const conRutas = clients.map(c => ({ ...c, pendientes: routes.filter(r => r.clientId === c.id && r.estado !== "invoiced").length }));
+  const filtered = conRutas.filter(c => !q.trim() || c.razon?.toLowerCase().includes(q.toLowerCase()) || c.nif?.toLowerCase().includes(q.toLowerCase()));
   return (
     <>
       <Header title="Elegir cliente" onBack={onBack} />
-      {conRutas.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>Crea primero clientes desde Ajustes → Clientes</div>}
-      {conRutas.map(c => (
-        <div key={c.id} style={S.card} onClick={() => c.pendientes > 0 && onPick(c.id)}>
+      <div style={{ padding: "0 16px", marginTop: 8 }}>
+        <div style={{ position: "relative" }}>
+          <Search size={18} style={{ position: "absolute", left: 14, top: 16, color: C.textMuted }} />
+          <input style={{ ...S.input, paddingLeft: 42 }} placeholder="Buscar por nombre o NIF…" value={q} onChange={e => setQ(e.target.value)} />
+        </div>
+      </div>
+      {filtered.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>{clients.length === 0 ? "Crea primero clientes desde Ajustes" : "Sin coincidencias"}</div>}
+      {filtered.map(c => (
+        <div key={c.id} style={{ ...S.card, cursor: c.pendientes > 0 ? "pointer" : "default", opacity: c.pendientes > 0 ? 1 : 0.6 }} onClick={() => c.pendientes > 0 && onPick(c.id)}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <b>{c.razon}</b>
-              <div style={{ fontSize: 12, color: C.textMuted }}>{c.nif}</div>
-            </div>
+            <div><b>{c.razon}</b><div style={{ fontSize: 12, color: C.textMuted }}>{c.nif}</div></div>
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: 22, fontWeight: 700, color: c.pendientes > 0 ? C.primary : C.textLight }}>{c.pendientes}</div>
               <div style={{ fontSize: 10, color: C.textMuted }}>pendientes</div>
@@ -545,14 +558,12 @@ function PickLinesScreen({ client, routes, settings, onBack, onEmit }) {
   const irpf = base * settings.irpf / 100;
   const iva = base * settings.iva / 100;
   const total = base - irpf + iva;
-
   const toggle = (id) => setSel(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
-
   return (
     <>
       <Header title={client?.razon || "Cliente"} onBack={onBack} />
       <div style={S.card}>
-        <div style={{ fontSize: 13, color: C.textMuted, marginBottom: 8 }}>Marca las rutas que quieres incluir:</div>
+        <div style={{ fontSize: 13, color: C.textMuted, marginBottom: 8 }}>Marca las rutas a incluir:</div>
         {sorted.map(r => (
           <div key={r.id} onClick={() => toggle(r.id)} style={{ display: "flex", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer", gap: 10 }}>
             <input type="checkbox" checked={sel.includes(r.id)} readOnly style={{ width: 20, height: 20 }} />
@@ -577,15 +588,20 @@ function PickLinesScreen({ client, routes, settings, onBack, onEmit }) {
   );
 }
 
-// =====================================================================
-// CLIENTES
-// =====================================================================
 function ClientsScreen({ clients, onBack, onAdd, onEdit, onDelete }) {
+  const [q, setQ] = useState("");
+  const filtered = clients.filter(c => !q.trim() || c.razon?.toLowerCase().includes(q.toLowerCase()) || c.nif?.toLowerCase().includes(q.toLowerCase()));
   return (
     <>
       <Header title="Clientes" onBack={onBack} />
-      {clients.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>No hay clientes</div>}
-      {clients.map(c => (
+      <div style={{ padding: "0 16px", marginTop: 8 }}>
+        <div style={{ position: "relative" }}>
+          <Search size={18} style={{ position: "absolute", left: 14, top: 16, color: C.textMuted }} />
+          <input style={{ ...S.input, paddingLeft: 42 }} placeholder="Buscar cliente…" value={q} onChange={e => setQ(e.target.value)} />
+        </div>
+      </div>
+      {filtered.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>{clients.length === 0 ? "No hay clientes" : "Sin coincidencias"}</div>}
+      {filtered.map(c => (
         <div key={c.id} style={S.card}>
           <b>{c.razon}</b>
           <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{c.nif}</div>
@@ -624,9 +640,6 @@ function ClientForm({ initial, onCancel, onSubmit }) {
   );
 }
 
-// =====================================================================
-// AJUSTES
-// =====================================================================
 function SettingsScreen({ settings, onSave, onClients }) {
   const [f, setF] = useState(settings);
   return (
@@ -642,6 +655,7 @@ function SettingsScreen({ settings, onSave, onClients }) {
         <label style={S.label}>Dirección</label><input style={S.input} value={f.direccion} onChange={e => setF({ ...f, direccion: e.target.value })} />
         <label style={S.label}>Código postal</label><input style={S.input} value={f.cp} onChange={e => setF({ ...f, cp: e.target.value })} />
         <label style={S.label}>Ciudad</label><input style={S.input} value={f.ciudad} onChange={e => setF({ ...f, ciudad: e.target.value })} />
+        <label style={S.label}>Teléfono</label><input style={S.input} value={f.telefono || ""} onChange={e => setF({ ...f, telefono: e.target.value })} />
 
         <div style={{ fontSize: 12, color: C.textLight, textTransform: "uppercase", marginTop: 16, marginBottom: 4, fontWeight: 700 }}>Vehículos</div>
         <label style={S.label}>Matrícula tractora</label><input style={S.input} value={f.tractora} onChange={e => setF({ ...f, tractora: e.target.value })} />
@@ -652,8 +666,10 @@ function SettingsScreen({ settings, onSave, onClients }) {
         <label style={S.label}>Ejercicio</label><input style={S.input} type="number" value={f.ejercicio} onChange={e => setF({ ...f, ejercicio: Number(e.target.value) })} />
         <label style={S.label}>IVA (%)</label><input style={S.input} type="number" value={f.iva} onChange={e => setF({ ...f, iva: Number(e.target.value) })} />
         <label style={S.label}>IRPF (%)</label><input style={S.input} type="number" value={f.irpf} onChange={e => setF({ ...f, irpf: Number(e.target.value) })} />
-        <label style={S.label}>Forma de pago</label><input style={S.input} value={f.formaPago} onChange={e => setF({ ...f, formaPago: e.target.value })} />
+        <label style={S.label}>IBAN (aparece en "Forma de Pago")</label><input style={S.input} value={f.iban || ""} onChange={e => setF({ ...f, iban: e.target.value })} placeholder="ES00 0000 0000 0000 0000 0000" />
+        <label style={S.label}>Forma de pago (si no hay IBAN)</label><input style={S.input} value={f.formaPago} onChange={e => setF({ ...f, formaPago: e.target.value })} />
         <label style={S.label}>Observaciones</label><input style={S.input} value={f.observaciones} onChange={e => setF({ ...f, observaciones: e.target.value })} />
+        <label style={S.label}>Registro mercantil (pie)</label><input style={S.input} value={f.registro || ""} onChange={e => setF({ ...f, registro: e.target.value })} placeholder="INS. REG. MER. TOM. 1613…" />
 
         <div style={{ fontSize: 12, color: C.textLight, textTransform: "uppercase", marginTop: 16, marginBottom: 4, fontWeight: 700 }}>Alertas</div>
         <label style={S.label}>Margen mínimo (%)</label><input style={S.input} type="number" value={f.margenAlerta} onChange={e => setF({ ...f, margenAlerta: Number(e.target.value) })} />
