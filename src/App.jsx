@@ -90,7 +90,7 @@ function Splash({ C, onDone }) {
         @keyframes roadDash { from{background-position:0 0} to{background-position:60px 0} }
         @keyframes wheelSpin { from{transform:rotate(0)} to{transform:rotate(360deg)} }
       `}</style>
-      <div style={{ position: "fixed", inset: 0, background: C.gradient, zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", animation: "fadeOutAll 1.9s forwards" }}>
+      <div onClick={onDone} style={{ position: "fixed", inset: 0, background: C.gradient, zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", animation: "fadeOutAll 1.9s forwards", cursor: "pointer" }}>
         <div style={{ position: "relative", width: 260, height: 120, animation: "driveIn 1.2s cubic-bezier(.2,.8,.2,1) forwards" }}>
           <svg viewBox="0 0 260 120" width="260" height="120" style={{ overflow: "visible" }}>
             {/* Caja del camión */}
@@ -123,6 +123,9 @@ function Splash({ C, onDone }) {
         </div>
         <div style={{ marginTop: 6, color: "rgba(255,255,255,0.85)", fontSize: 13, fontWeight: 500, letterSpacing: 1, animation: "tagIn 1.4s backwards" }}>
           rutas · gastos · facturación
+        </div>
+        <div style={{ position: "absolute", bottom: 40, color: "rgba(255,255,255,0.6)", fontSize: 11, fontWeight: 500, letterSpacing: 0.5, animation: "tagIn 1.4s backwards" }}>
+          toca para continuar
         </div>
       </div>
     </>
@@ -390,11 +393,30 @@ export default function App() {
       const s = await dataApi.getSettings();
       setSettings(s);
       setTema(s.tema || "light");
+
+      // Migración: vincular rutas huérfanas (con `cliente` texto pero sin clientId)
+      const allRoutes = await dataApi.getAll("routes");
+      const allClients = await dataApi.getAll("clients");
+      let migrated = 0;
+      for (const r of allRoutes) {
+        if (!r.clientId && r.cliente && r.cliente.trim()) {
+          const name = r.cliente.trim().toLowerCase();
+          let cli = allClients.find(c => (c.razon || "").trim().toLowerCase() === name);
+          if (!cli) {
+            cli = await dataApi.put("clients", { razon: r.cliente.trim(), nif: "", direccion: "", cp: "", ciudad: "" });
+            allClients.push(cli);
+          }
+          await dataApi.put("routes", { ...r, clientId: cli.id });
+          migrated++;
+        }
+      }
+
       setRoutes(await dataApi.getAll("routes"));
       setExpenses(await dataApi.getAll("expenses"));
       setInvoices(await dataApi.getAll("invoices"));
       setClients(await dataApi.getAll("clients"));
       setReady(true);
+      if (migrated > 0) setTimeout(() => setToast(`${migrated} ruta${migrated > 1 ? "s" : ""} vinculada${migrated > 1 ? "s" : ""} a cliente`), 2100);
     })();
   }, []);
 
@@ -458,13 +480,29 @@ export default function App() {
   }, [invoices, hoy, settings]);
 
   /* -------- Acciones -------- */
+  // Garantiza que toda ruta quede vinculada a un cliente real (crea uno si hace falta)
+  const ensureClientId = useCallback(async (data) => {
+    if (data.clientId) return data.clientId;
+    const name = (data.cliente || "").trim();
+    if (!name) return null;
+    const existing = clients.find(c => (c.razon || "").trim().toLowerCase() === name.toLowerCase());
+    if (existing) return existing.id;
+    const created = await dataApi.put("clients", { razon: name, nif: "", direccion: "", cp: "", ciudad: "" });
+    setClients(cs => [...cs, created]);
+    return created.id;
+  }, [clients]);
+
   const startRoute = async (data) => {
     haptic();
-    await dataApi.put("routes", { ...data, precio: Number(data.precio), km: Number(data.km || 0), peso: Number(data.peso || 0), estado: "delivered", fecha: data.fecha || new Date().toISOString(), inicio: new Date().toISOString() });
+    const clientId = await ensureClientId(data);
+    const cliente = clients.find(c => c.id === clientId)?.razon || data.cliente || "";
+    await dataApi.put("routes", { ...data, clientId, cliente, precio: Number(data.precio), km: Number(data.km || 0), peso: Number(data.peso || 0), estado: "delivered", fecha: data.fecha || new Date().toISOString(), inicio: new Date().toISOString() });
     await reload(); setScreen("home"); showToast("Ruta registrada");
   };
   const updateRoute = async (data) => {
-    await dataApi.put("routes", { ...editing, ...data, precio: Number(data.precio), km: Number(data.km || 0), peso: Number(data.peso || 0) });
+    const clientId = await ensureClientId(data);
+    const cliente = clients.find(c => c.id === clientId)?.razon || data.cliente || "";
+    await dataApi.put("routes", { ...editing, ...data, clientId, cliente, precio: Number(data.precio), km: Number(data.km || 0), peso: Number(data.peso || 0) });
     setEditing(null); await reload(); setScreen("routesList");
   };
   const removeRoute = async (id) => { await dataApi.remove("routes", id); await reload(); setConfirm(null); };
@@ -731,7 +769,17 @@ function RoutesListScreen({ C, S, routes, clients, onBack, onEdit, onDelete }) {
           <input style={{ ...S.input, paddingLeft: 42 }} placeholder="Buscar por origen, destino, expediente…" value={q} onChange={e => setQ(e.target.value)} />
         </div>
       </div>
-      {filtered.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>{routes.length === 0 ? "Sin rutas todavía" : "Sin coincidencias"}</div>}
+      {filtered.length === 0 && (
+        <div style={{ ...S.card, textAlign: "center", padding: 32 }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>🚚</div>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+            {routes.length === 0 ? "Aún no tienes rutas" : "Sin coincidencias"}
+          </div>
+          <div style={{ color: C.textMuted, fontSize: 13 }}>
+            {routes.length === 0 ? "Vuelve a Inicio y pulsa “Registrar nueva ruta”." : "Prueba con otro término de búsqueda."}
+          </div>
+        </div>
+      )}
       {filtered.map(r => {
         const c = clients.find(cl => cl.id === r.clientId);
         const fact = r.estado === "invoiced";
@@ -739,7 +787,11 @@ function RoutesListScreen({ C, S, routes, clients, onBack, onEdit, onDelete }) {
           <div key={r.id} style={{ ...S.card, opacity: fact ? 0.7 : 1 }}>
             <div style={{ display: "flex", justifyContent: "space-between" }}><b style={{ color: C.text }}><Highlight text={`${r.origen} → ${r.destino}`} query={q} color={C.primary} /></b><span style={{ color: C.success, fontWeight: 700 }}>{eur(r.precio)}</span></div>
             <div style={{ fontSize: 12, color: C.textMuted, marginTop: 4 }}><Highlight text={c?.razon || r.cliente || ""} query={q} color={C.primary} /> · {fmtDate(r.fecha || r.inicio)}{r.expediente ? <> · Exp. <Highlight text={r.expediente} query={q} color={C.primary} /></> : ""}</div>
-            <div style={{ fontSize: 11, color: fact ? C.success : C.warning, marginTop: 4, fontWeight: 600 }}>{fact ? "✓ Facturada" : "⏳ Pendiente"}</div>
+            <div style={{ marginTop: 8 }}>
+              {fact
+                ? <span style={S.badge(C.successBg, C.success)}><CheckCircle2 size={12} />Facturada</span>
+                : <span style={S.badge(C.warningBg, C.warning)}><Clock size={12} />Pendiente de facturar</span>}
+            </div>
             {!fact && <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
               <button onClick={() => onEdit(r)} style={{ ...S.btn(C.primary, 40), fontSize: 13 }}><Edit3 size={16} />Editar</button>
               <button onClick={() => onDelete(r.id)} style={{ ...S.btn(C.danger, 40), fontSize: 13 }}><Trash2 size={16} />Borrar</button>
@@ -892,7 +944,17 @@ function InvoicesScreen({ C, S, invoices, clients, settings, hoy, onNew, onOpen 
           {chip("paid", "Cobradas")}
         </div>
       </div>
-      {filtered.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>Sin facturas en este filtro.</div>}
+      {filtered.length === 0 && (
+        <div style={{ ...S.card, textAlign: "center", padding: 32 }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>🧾</div>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+            {invoices.length === 0 ? "Aún no has emitido facturas" : "Sin facturas en este filtro"}
+          </div>
+          <div style={{ color: C.textMuted, fontSize: 13 }}>
+            {invoices.length === 0 ? "Pulsa el botón verde de abajo para emitir tu primera factura a partir de rutas pendientes." : "Cambia el filtro o ajusta la búsqueda."}
+          </div>
+        </div>
+      )}
       {filtered.map(({ i, st }) => {
         const c = clients.find(cl => cl.id === i.clientId);
         return (
@@ -1136,11 +1198,26 @@ function PickClientScreen({ C, S, clients, routes, onBack, onPick }) {
           <input style={{ ...S.input, paddingLeft: 42 }} placeholder="Buscar por nombre o NIF…" value={q} onChange={e => setQ(e.target.value)} />
         </div>
       </div>
-      {filtered.length === 0 && <div style={{ ...S.card, color: C.textLight, textAlign: "center" }}>{clients.length === 0 ? "Crea primero clientes desde Ajustes" : "Sin coincidencias"}</div>}
+      {filtered.length === 0 && (
+        <div style={{ ...S.card, textAlign: "center", padding: 32 }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>📋</div>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+            {clients.length === 0 ? "Aún no tienes clientes" : "Sin coincidencias"}
+          </div>
+          <div style={{ color: C.textMuted, fontSize: 13 }}>
+            {clients.length === 0 ? "Crea clientes desde Ajustes → Gestionar clientes, o ponlos al vuelo al registrar una ruta." : "Prueba a buscar por NIF o con menos letras."}
+          </div>
+        </div>
+      )}
       {filtered.map(c => (
         <div key={c.id} style={{ ...S.card, cursor: c.pendientes > 0 ? "pointer" : "default", opacity: c.pendientes > 0 ? 1 : 0.6 }} onClick={() => c.pendientes > 0 && onPick(c.id)}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div><b style={{ color: C.text }}><Highlight text={c.razon} query={q} color={C.primary} /></b><div style={{ fontSize: 12, color: C.textMuted }}><Highlight text={c.nif || ""} query={q} color={C.primary} /></div></div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <b style={{ color: C.text }}><Highlight text={c.razon} query={q} color={C.primary} /></b>
+              <div style={{ fontSize: 12, color: c.nif ? C.textMuted : C.danger, marginTop: 2, fontWeight: c.nif ? 400 : 600 }}>
+                {c.nif ? <Highlight text={c.nif} query={q} color={C.primary} /> : "⚠ Sin NIF — edítalo antes de facturar"}
+              </div>
+            </div>
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: 22, fontWeight: 700, color: c.pendientes > 0 ? C.primary : C.textLight }}>{c.pendientes}</div>
               <div style={{ fontSize: 10, color: C.textMuted }}>pendientes</div>
