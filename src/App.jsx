@@ -19,6 +19,83 @@ const haptic = (ms = 10) => { try { navigator.vibrate && navigator.vibrate(ms); 
 const monthKey = (iso) => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const monthLabel = (key) => { const [y, m] = key.split("-"); const nombres = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]; return `${nombres[Number(m) - 1]} ${y}`; };
 
+/* ---------------- Categorías de gasto ---------------- */
+// Cubre tanto gastos de ruta (combustible, peajes, dietas, parking) como gastos generales del autónomo
+// (mantenimiento, neumáticos, seguro, ITV, impuestos, cuota autónomos, formación, otros).
+const CATEGORIES = [
+  { key: "fuel",        label: "Combustible",     emoji: "⛽", colorKey: "warning", scope: "ruta" },
+  { key: "toll",        label: "Peaje",           emoji: "🛣️", colorKey: "info",    scope: "ruta" },
+  { key: "meal",        label: "Dieta",           emoji: "🍽️", colorKey: "info",    scope: "ruta" },
+  { key: "parking",     label: "Parking",         emoji: "🅿️", colorKey: "info",    scope: "ruta" },
+  { key: "tires",       label: "Neumáticos",      emoji: "🛞", colorKey: "danger",  scope: "general" },
+  { key: "maintenance", label: "Mantenimiento",   emoji: "🔧", colorKey: "warning", scope: "general" },
+  { key: "repair",      label: "Reparación",      emoji: "🛠️", colorKey: "danger",  scope: "general" },
+  { key: "insurance",   label: "Seguro",          emoji: "🛡️", colorKey: "primary", scope: "general" },
+  { key: "itv",         label: "ITV / Tacógrafo", emoji: "📋", colorKey: "primary", scope: "general" },
+  { key: "tax",         label: "Impuestos",       emoji: "💼", colorKey: "danger",  scope: "general" },
+  { key: "autonomo",    label: "Cuota autónomo",  emoji: "👤", colorKey: "primary", scope: "general" },
+  { key: "training",    label: "Formación / CAP", emoji: "🎓", colorKey: "info",    scope: "general" },
+  { key: "other",       label: "Otros",           emoji: "📌", colorKey: "textMuted", scope: "ambos" },
+];
+const CAT_BY_KEY = Object.fromEntries(CATEGORIES.map(c => [c.key, c]));
+const catLabel = (key) => { const c = CAT_BY_KEY[key]; return c ? `${c.emoji} ${c.label}` : key; };
+
+/* ---------------- Helpers de combustible ---------------- */
+// Obtiene el último precio €/L pagado por el usuario, calculado a partir de sus repostajes
+function lastFuelPrice(expenses) {
+  const fuels = expenses
+    .filter(e => e.tipo === "fuel" && Number(e.litros) > 0 && Number(e.importe) > 0)
+    .sort((a, b) => (b.fecha || "").localeCompare(a.fecha || ""));
+  if (!fuels.length) return null;
+  return Number(fuels[0].importe) / Number(fuels[0].litros);
+}
+// Consumo medio L/100km — calculado sobre histórico de repostajes con km
+function avgConsumption(expenses) {
+  const rf = expenses.filter(e => e.tipo === "fuel" && e.litros && e.km).sort((a, b) => Number(a.km) - Number(b.km));
+  if (rf.length < 2) return null;
+  const l = rf.slice(1).reduce((s, r) => s + Number(r.litros), 0);
+  const k = Number(rf[rf.length - 1].km) - Number(rf[0].km);
+  return k > 0 ? (l * 100) / k : null;
+}
+// Estimación de coste de combustible para X km, usando histórico cuando exista
+function estimateFuelCost(km, expenses, settings) {
+  const consumo = avgConsumption(expenses) ?? Number(settings?.consumoEstimado || 30);
+  const precio = lastFuelPrice(expenses) ?? Number(settings?.precioGasoil || 1.45);
+  const litros = (Number(km) || 0) * consumo / 100;
+  return { litros, coste: litros * precio, consumo, precio, fromHistory: avgConsumption(expenses) != null && lastFuelPrice(expenses) != null };
+}
+
+/* ---------------- Helpers de periodo (Hoy / Semana / Mes / Año) ---------------- */
+const PERIODS = [
+  { key: "today",   label: "Hoy" },
+  { key: "week",    label: "Semana" },
+  { key: "month",   label: "Mes" },
+  { key: "quarter", label: "Trim." },
+  { key: "year",    label: "Año" },
+  { key: "all",     label: "Todo" },
+];
+function periodRange(periodKey, now = new Date()) {
+  const start = new Date(now); start.setHours(0, 0, 0, 0);
+  const end = new Date(now); end.setHours(23, 59, 59, 999);
+  if (periodKey === "today") return { start, end };
+  if (periodKey === "week") {
+    const day = (start.getDay() + 6) % 7; // lunes=0
+    start.setDate(start.getDate() - day);
+    return { start, end };
+  }
+  if (periodKey === "month") return { start: new Date(now.getFullYear(), now.getMonth(), 1), end };
+  if (periodKey === "quarter") { const q = Math.floor(now.getMonth() / 3); return { start: new Date(now.getFullYear(), q * 3, 1), end }; }
+  if (periodKey === "year")    return { start: new Date(now.getFullYear(), 0, 1), end };
+  return { start: new Date(0), end };
+}
+function inPeriod(iso, periodKey) {
+  if (periodKey === "all") return true;
+  if (!iso) return false;
+  const d = new Date(iso);
+  const { start, end } = periodRange(periodKey);
+  return d >= start && d <= end;
+}
+
 /* ---------------- Paleta (light + dark) ---------------- */
 const themes = {
   light: {
@@ -214,6 +291,21 @@ function AutoInput({ C, S, value, onChange, suggestions, placeholder, type = "te
 }
 
 /* ---------------- Estado de cobro (helpers) ---------------- */
+function PeriodChips({ C, value, onChange, options = PERIODS }) {
+  return (
+    <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 6 }}>
+      {options.map(p => (
+        <button key={p.key} onClick={() => { haptic(5); onChange(p.key); }}
+          style={{ padding: "7px 14px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
+            background: value === p.key ? C.primary : C.surfaceAlt,
+            color: value === p.key ? "white" : C.text,
+            border: `1px solid ${value === p.key ? C.primary : C.border}`,
+            borderRadius: 20, cursor: "pointer" }}>{p.label}</button>
+      ))}
+    </div>
+  );
+}
+
 function invoiceStatus(inv, today, avisoDias = 7) {
   const pagado = (inv.pagos || []).reduce((s, p) => s + Number(p.importe || 0), 0);
   const total = Number(inv.total || 0);
@@ -508,8 +600,18 @@ export default function App() {
   const removeRoute = async (id) => { await dataApi.remove("routes", id); await reload(); setConfirm(null); };
   const addExpense = async (data) => {
     haptic();
-    await dataApi.put("expenses", { routeId: active.id, fecha: new Date().toISOString(), ...data, importe: Number(data.importe), litros: data.litros ? Number(data.litros) : null, km: data.km ? Number(data.km) : null });
-    await reload(); setModal(null);
+    // routeId puede venir explícito (gasto general) o tomarse de la ruta activa
+    const routeId = data.routeId !== undefined ? data.routeId : (active?.id || null);
+    await dataApi.put("expenses", {
+      routeId,
+      fecha: data.fecha || new Date().toISOString(),
+      tipo: data.tipo,
+      importe: Number(data.importe),
+      litros: data.litros ? Number(data.litros) : null,
+      km: data.km ? Number(data.km) : null,
+      motivo: data.motivo || "",
+    });
+    await reload(); setModal(null); showToast("Gasto guardado");
   };
   const removeExpense = async (id) => { await dataApi.remove("expenses", id); await reload(); setConfirm(null); };
   const saveClient = async (data) => { await dataApi.put("clients", { ...editingClient, ...data }); setEditingClient(null); await reload(); setScreen("clients"); };
@@ -611,35 +713,37 @@ export default function App() {
       {showSplash && <Splash C={C} onDone={() => setShowSplash(false)} />}
 
       <div style={S.container}>
-        {screen === "home" && <HomeScreen C={C} S={S} invoices={invoices} routes={routes} consumoMedio={consumoMedio} active={active} cobros={cobrosResumen} onNew={() => setScreen("new")} onActive={() => setScreen("active")} onRoutes={() => setScreen("routesList")} onCobros={() => setScreen("cobros")} onStats={() => setScreen("stats")} />}
-        {screen === "new" && <RouteForm C={C} S={S} clients={clients} settings={settings} suggestions={suggestions} onCancel={() => setScreen("home")} onSubmit={startRoute} />}
-        {screen === "editRoute" && <RouteForm C={C} S={S} clients={clients} settings={settings} suggestions={suggestions} initial={editing} editing onCancel={() => { setEditing(null); setScreen("routesList"); }} onSubmit={updateRoute} />}
+        {screen === "home" && <HomeScreen C={C} S={S} invoices={invoices} routes={routes} expenses={expenses} consumoMedio={consumoMedio} active={active} cobros={cobrosResumen} onNew={() => setScreen("new")} onActive={() => setScreen("active")} onRoutes={() => setScreen("routesList")} onCobros={() => setScreen("cobros")} onStats={() => setScreen("stats")} onExpenses={() => setScreen("expenses")} />}
+        {screen === "new" && <RouteForm C={C} S={S} clients={clients} settings={settings} suggestions={suggestions} expenses={expenses} onCancel={() => setScreen("home")} onSubmit={startRoute} />}
+        {screen === "editRoute" && <RouteForm C={C} S={S} clients={clients} settings={settings} suggestions={suggestions} expenses={expenses} initial={editing} editing onCancel={() => { setEditing(null); setScreen("routesList"); }} onSubmit={updateRoute} />}
         {screen === "routesList" && <RoutesListScreen C={C} S={S} routes={routes} clients={clients} onBack={() => setScreen("home")} onEdit={(r) => { setEditing(r); setScreen("editRoute"); }} onDelete={(id) => setConfirm({ msg: "¿Eliminar esta ruta?", onYes: () => removeRoute(id) })} />}
-        {screen === "active" && <ActiveScreen C={C} S={S} route={active} expenses={expensesOf(active?.id)} totals={totals(active)} margenAlerta={settings.margenAlerta} onBack={() => setScreen("home")} onAddFuel={() => setModal("fuel")} onAddExpense={() => setModal("expense")} onDeleteExpense={(id) => setConfirm({ msg: "¿Eliminar este gasto?", onYes: () => removeExpense(id) })} />}
+        {screen === "active" && <ActiveScreen C={C} S={S} route={active} expenses={expensesOf(active?.id)} totals={totals(active)} margenAlerta={settings.margenAlerta} fuelEstimate={active?.km > 0 ? estimateFuelCost(active.km, expenses, settings) : null} onBack={() => setScreen("home")} onAddFuel={() => setModal("fuel")} onAddExpense={() => setModal("expense")} onDeleteExpense={(id) => setConfirm({ msg: "¿Eliminar este gasto?", onYes: () => removeExpense(id) })} />}
         {screen === "invoices" && <InvoicesScreen C={C} S={S} invoices={invoices} clients={clients} settings={settings} hoy={hoy} onNew={() => setScreen("invoiceClient")} onOpen={(id) => { setViewingInvoiceId(id); setScreen("invoiceDetail"); }} />}
         {screen === "invoiceDetail" && viewingInvoice && <InvoiceDetailScreen C={C} S={S} invoice={viewingInvoice} client={clients.find(c => c.id === viewingInvoice.clientId)} routes={routes.filter(r => viewingInvoice.lineRouteIds?.includes(r.id))} settings={settings} hoy={hoy} onBack={() => { setViewingInvoiceId(null); setScreen("invoices"); }} onDownload={() => downloadInvoice(viewingInvoice)} onRegisterPayment={() => setPaymentForInvoiceId(viewingInvoice.id)} onDeletePayment={(pid) => setConfirm({ msg: "¿Eliminar este cobro?", onYes: () => deletePayment(viewingInvoice.id, pid) })} />}
         {screen === "invoiceClient" && <PickClientScreen C={C} S={S} clients={clients} routes={routes} onBack={() => setScreen("invoices")} onPick={(id) => { setInvoiceClientId(id); setScreen("invoiceLines"); }} />}
         {screen === "invoiceLines" && <PickLinesScreen C={C} S={S} client={clients.find(c => c.id === invoiceClientId)} routes={routes.filter(r => r.clientId === invoiceClientId && r.estado !== "invoiced")} settings={settings} onBack={() => setScreen("invoiceClient")} onEmit={(routeIds) => emitInvoice(invoiceClientId, routeIds)} />}
         {screen === "cobros" && <CobrosScreen C={C} S={S} invoices={invoices} clients={clients} settings={settings} hoy={hoy} onBack={() => setScreen("home")} onOpen={(id) => { setViewingInvoiceId(id); setScreen("invoiceDetail"); }} onRegisterPayment={(id) => setPaymentForInvoiceId(id)} />}
+        {screen === "expenses" && <ExpensesScreen C={C} S={S} expenses={expenses} routes={routes} settings={settings} onBack={() => setScreen("home")} onAdd={() => setModal("global-expense")} onDelete={(id) => setConfirm({ msg: "¿Eliminar este gasto?", onYes: () => removeExpense(id) })} onEdit={() => {}} />}
         {screen === "stats" && <StatsScreen C={C} S={S} invoices={invoices} expenses={expenses} routes={routes} onBack={() => setScreen("home")} />}
         {screen === "clients" && <ClientsScreen C={C} S={S} clients={clients} invoices={invoices} hoy={hoy} settings={settings} onBack={() => setScreen("settings")} onAdd={() => { setEditingClient({}); setScreen("editClient"); }} onEdit={(c) => { setEditingClient(c); setScreen("editClient"); }} onDelete={(id) => setConfirm({ msg: "¿Eliminar cliente?", onYes: () => removeClient(id) })} />}
         {screen === "editClient" && <ClientForm C={C} S={S} initial={editingClient} onCancel={() => { setEditingClient(null); setScreen("clients"); }} onSubmit={saveClient} />}
         {screen === "settings" && <SettingsScreen C={C} S={S} settings={settings} tema={tema} onSave={saveSettings} onClients={() => setScreen("clients")} onExport={handleExport} onImport={handleImport} onToggleTheme={async () => { const t = tema === "light" ? "dark" : "light"; const s = { ...settings, tema: t }; await dataApi.saveSettings(s); setSettings(s); setTema(t); }} />}
       </div>
 
-      {modal && <ExpenseModal C={C} S={S} kind={modal} onCancel={() => setModal(null)} onSave={addExpense} />}
+      {modal && <ExpenseModal C={C} S={S} kind={modal === "global-expense" ? null : modal} routes={routes} defaultRouteId={modal === "global-expense" ? null : active?.id} onCancel={() => setModal(null)} onSave={addExpense} />}
       {paymentForInvoiceId && <PaymentModal C={C} S={S} invoice={invoices.find(i => i.id === paymentForInvoiceId)} onCancel={() => setPaymentForInvoiceId(null)} onSave={(p) => registerPayment(paymentForInvoiceId, p)} />}
       {confirm && <Confirm C={C} S={S} msg={confirm.msg} onYes={confirm.onYes} onNo={() => setConfirm(null)} />}
       {toast && (
         <div style={{ position: "fixed", bottom: 100, left: "50%", transform: "translateX(-50%)", background: C.text, color: C.surface, padding: "10px 18px", borderRadius: 24, fontSize: 14, fontWeight: 600, zIndex: 300, boxShadow: "0 6px 20px rgba(0,0,0,0.25)" }}>{toast}</div>
       )}
-      {["home", "invoices", "cobros", "settings"].includes(screen) && (
+      {["home", "invoices", "cobros", "expenses", "settings"].includes(screen) && (
         <div style={S.tabBar}>
           <div style={S.tabInner}>
-            <button style={S.tab(screen === "home")} onClick={() => setScreen("home")}><HomeIcon size={22} />Inicio</button>
-            <button style={S.tab(screen === "invoices")} onClick={() => setScreen("invoices")}><FileText size={22} />Facturas</button>
-            <button style={S.tab(screen === "cobros")} onClick={() => setScreen("cobros")}><CreditCard size={22} />Cobros</button>
-            <button style={S.tab(screen === "settings")} onClick={() => setScreen("settings")}><SettingsIcon size={22} />Ajustes</button>
+            <button style={S.tab(screen === "home")} onClick={() => setScreen("home")}><HomeIcon size={20} /><span style={{ fontSize: 10 }}>Inicio</span></button>
+            <button style={S.tab(screen === "invoices")} onClick={() => setScreen("invoices")}><FileText size={20} /><span style={{ fontSize: 10 }}>Facturas</span></button>
+            <button style={S.tab(screen === "cobros")} onClick={() => setScreen("cobros")}><CreditCard size={20} /><span style={{ fontSize: 10 }}>Cobros</span></button>
+            <button style={S.tab(screen === "expenses")} onClick={() => setScreen("expenses")}><Receipt size={20} /><span style={{ fontSize: 10 }}>Gastos</span></button>
+            <button style={S.tab(screen === "settings")} onClick={() => setScreen("settings")}><SettingsIcon size={20} /><span style={{ fontSize: 10 }}>Ajustes</span></button>
           </div>
         </div>
       )}
@@ -651,11 +755,15 @@ export default function App() {
    PANTALLAS
    ================================================================ */
 
-function HomeScreen({ C, S, invoices, routes, consumoMedio, active, cobros, onNew, onActive, onRoutes, onCobros, onStats }) {
+function HomeScreen({ C, S, invoices, routes, expenses, consumoMedio, active, cobros, onNew, onActive, onRoutes, onCobros, onStats, onExpenses }) {
   const now = new Date();
   const mes = invoices.filter(i => { const d = new Date(i.fecha); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); });
   const ingresosMes = mes.reduce((s, i) => s + i.base, 0);
   const pendientesFact = routes.filter(r => r.estado !== "invoiced").length;
+  // Gastos del mes (independientemente de si están atados a ruta o no)
+  const gastosMes = expenses.filter(e => inPeriod(e.fecha, "month")).reduce((s, e) => s + Number(e.importe || 0), 0);
+  const gastosHoy = expenses.filter(e => inPeriod(e.fecha, "today")).reduce((s, e) => s + Number(e.importe || 0), 0);
+  const beneficioMes = ingresosMes - gastosMes;
   return (
     <>
       <Header C={C} S={S} title="TruckerPro" />
@@ -667,6 +775,24 @@ function HomeScreen({ C, S, invoices, routes, consumoMedio, active, cobros, onNe
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginTop: 10, opacity: 0.95 }}>
           <span>{mes.length} facturas · {pendientesFact} pendientes facturar</span>
           <span><TrendingUp size={14} style={{ verticalAlign: "middle" }} /> {eur(cobros.cobradoMes)} cobrados</span>
+        </div>
+      </div>
+
+      {/* Resumen P&L del mes: ingresos - gastos = beneficio */}
+      <div style={{ ...S.card, cursor: "pointer" }} onClick={onExpenses}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ fontSize: 13, color: C.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>📊 Resultado del mes</div>
+          {gastosHoy > 0 && <span style={S.badge(C.warningBg, C.warning)}>hoy {eur(gastosHoy)}</span>}
+        </div>
+        <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+          <div>
+            <div style={{ fontSize: 28, fontWeight: 800, color: beneficioMes >= 0 ? C.success : C.danger, letterSpacing: -0.5 }}>{eur(beneficioMes)}</div>
+            <div style={{ fontSize: 11, color: C.textMuted }}>beneficio</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 8, color: C.textMuted }}>
+          <span>Ingresos: <b style={{ color: C.success }}>{eur(ingresosMes)}</b></span>
+          <span>Gastos: <b style={{ color: C.danger }}>-{eur(gastosMes)}</b></span>
         </div>
       </div>
 
@@ -707,11 +833,19 @@ function HomeScreen({ C, S, invoices, routes, consumoMedio, active, cobros, onNe
   );
 }
 
-function RouteForm({ C, S, initial, clients, settings, suggestions, onCancel, onSubmit, editing }) {
+function RouteForm({ C, S, initial, clients, settings, suggestions, expenses, onCancel, onSubmit, editing }) {
   const today = new Date().toISOString().slice(0, 10);
   const [f, setF] = useState(initial ? { ...initial, fecha: (initial.fecha || initial.inicio || "").slice(0, 10) } : { fecha: today, clientId: "", cliente: "", origen: "", destino: "", expediente: "", km: "", peso: "", precio: "" });
   const [newClient, setNewClient] = useState(false);
   const valid = (f.clientId || (newClient && f.cliente)) && f.origen && f.destino && f.precio;
+  // Estimación de combustible en vivo
+  const fuelEst = useMemo(() => Number(f.km) > 0 ? estimateFuelCost(f.km, expenses || [], settings) : null, [f.km, expenses, settings]);
+  // Margen estimado a partir de la previsión de combustible
+  const margenEst = useMemo(() => {
+    const p = Number(f.precio); if (!p || !fuelEst) return null;
+    const ben = p - fuelEst.coste;
+    return { coste: fuelEst.coste, ben, margen: (ben / p) * 100 };
+  }, [f.precio, fuelEst]);
   return (
     <>
       <Header C={C} S={S} title={editing ? "Editar ruta" : "Nueva ruta"} onBack={onCancel} />
@@ -741,6 +875,23 @@ function RouteForm({ C, S, initial, clients, settings, suggestions, onCancel, on
         <AutoInput C={C} S={S} value={f.expediente} onChange={v => setF({ ...f, expediente: v })} suggestions={suggestions.expedientes} placeholder="Nº expediente" />
         <label style={S.label}>Precio acordado (€)</label><input style={S.input} type="number" inputMode="decimal" value={f.precio} onChange={e => setF({ ...f, precio: e.target.value })} />
         <label style={S.label}>Kilómetros (opcional)</label><input style={S.input} type="number" value={f.km} onChange={e => setF({ ...f, km: e.target.value })} />
+        {fuelEst && (
+          <div style={{ background: C.warningBg, border: `1px solid ${C.warning}`, padding: 12, borderRadius: 10, marginBottom: 10, marginTop: -2 }}>
+            <div style={{ fontSize: 13, color: C.text, fontWeight: 600, display: "flex", justifyContent: "space-between" }}>
+              <span>⛽ Coste combustible estimado</span>
+              <b style={{ color: C.warning }}>{eur(fuelEst.coste)}</b>
+            </div>
+            <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>
+              {fuelEst.litros.toFixed(1)} L · {fuelEst.consumo.toFixed(1)} L/100km × {fuelEst.precio.toFixed(3)} €/L
+              {fuelEst.fromHistory ? " · de tu histórico" : " · valores en Ajustes"}
+            </div>
+            {margenEst && (
+              <div style={{ fontSize: 11, color: margenEst.margen < (settings?.margenAlerta || 20) ? C.danger : C.success, marginTop: 4, fontWeight: 700 }}>
+                Beneficio estimado solo combustible: {eur(margenEst.ben)} ({margenEst.margen.toFixed(1)}%)
+              </div>
+            )}
+          </div>
+        )}
         <label style={S.label}>Peso en t (opcional)</label><input style={S.input} type="number" value={f.peso} onChange={e => setF({ ...f, peso: e.target.value })} />
         <div style={{ fontSize: 12, color: C.textMuted, marginTop: 8 }}>Tractora: <b>{settings.tractora || "(en Ajustes)"}</b> · Remolque: <b>{settings.remolque || "(en Ajustes)"}</b></div>
       </div>
@@ -803,15 +954,23 @@ function RoutesListScreen({ C, S, routes, clients, onBack, onEdit, onDelete }) {
   );
 }
 
-function ActiveScreen({ C, S, route, expenses, totals, margenAlerta, onBack, onAddFuel, onAddExpense, onDeleteExpense }) {
+function ActiveScreen({ C, S, route, expenses, totals, margenAlerta, fuelEstimate, onBack, onAddFuel, onAddExpense, onDeleteExpense }) {
   if (!route) return null;
   const { gastos, beneficio, margen } = totals;
   const color = margen < 20 ? C.danger : margen < 30 ? C.warning : C.success;
-  const tipoLabel = { fuel: "⛽ Gasoil", toll: "🛣️ Peaje", meal: "🍽️ Dieta", parking: "🅿️ Parking", other: "📌 Otro" };
   return (
     <>
       <Header C={C} S={S} title="Gastos de ruta" onBack={onBack} />
-      <div style={S.card}><div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>{route.origen} → {route.destino}</div><div style={{ fontSize: 13, color: C.textMuted, marginTop: 4 }}>{route.cliente}</div></div>
+      <div style={S.card}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>{route.origen} → {route.destino}</div>
+        <div style={{ fontSize: 13, color: C.textMuted, marginTop: 4 }}>{route.cliente}{route.km ? ` · ${route.km} km` : ""}</div>
+        {fuelEstimate && Number(route.km) > 0 && (
+          <div style={{ marginTop: 10, padding: 10, background: C.warningBg, borderRadius: 8, fontSize: 12, color: C.text }}>
+            💡 Estimación combustible: <b>{eur(fuelEstimate.coste)}</b> ({fuelEstimate.litros.toFixed(1)} L)
+            <div style={{ fontSize: 10, color: C.textMuted, marginTop: 2 }}>{fuelEstimate.consumo.toFixed(1)} L/100km × {fuelEstimate.precio.toFixed(3)} €/L {fuelEstimate.fromHistory ? "(de tu histórico)" : "(valores por defecto)"}</div>
+          </div>
+        )}
+      </div>
       <div style={{ ...S.card, borderColor: color, borderWidth: 2 }}>
         <div style={S.stat}><span>Precio flete</span><b>{eur(route.precio)}</b></div>
         <div style={S.stat}><span>Gastos</span><b style={{ color: C.danger }}>-{eur(gastos)}</b></div>
@@ -824,7 +983,10 @@ function ActiveScreen({ C, S, route, expenses, totals, margenAlerta, onBack, onA
         {expenses.length === 0 && <div style={{ color: C.textLight, fontSize: 13 }}>Sin gastos</div>}
         {expenses.map(e => (
           <div key={e.id} style={{ ...S.stat, alignItems: "center" }}>
-            <span>{tipoLabel[e.tipo]}{e.litros ? ` · ${e.litros} L` : ""}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14 }}>{catLabel(e.tipo)}{e.litros ? ` · ${e.litros} L` : ""}</div>
+              {e.motivo && <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{e.motivo}</div>}
+            </div>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <b>{eur(e.importe)}</b>
               <button onClick={() => onDeleteExpense(e.id)} style={{ background: "none", border: "none", color: C.textLight, cursor: "pointer" }}><Trash2 size={16} /></button>
@@ -840,21 +1002,90 @@ function ActiveScreen({ C, S, route, expenses, totals, margenAlerta, onBack, onA
   );
 }
 
-function ExpenseModal({ C, S, kind, onCancel, onSave }) {
-  const isFuel = kind === "fuel";
-  const [f, setF] = useState({ tipo: isFuel ? "fuel" : "toll", importe: "", litros: "", km: "" });
+function ExpenseModal({ C, S, kind, routes, defaultRouteId, onCancel, onSave }) {
+  // kind can be "fuel" (force fuel category) or null (free choice)
+  const today = new Date().toISOString().slice(0, 10);
+  const [f, setF] = useState({
+    tipo: kind === "fuel" ? "fuel" : "toll",
+    importe: "",
+    litros: "",
+    km: "",
+    motivo: "",
+    fecha: today,
+    routeId: defaultRouteId || "",
+  });
+  const cat = CAT_BY_KEY[f.tipo];
+  const showFuelFields = f.tipo === "fuel";
+  const valid = Number(f.importe) > 0;
+  // Lista de rutas en orden inverso, máximo 30
+  const recentRoutes = useMemo(() => [...(routes || [])].sort((a, b) => (b.fecha || "").localeCompare(a.fecha || "")).slice(0, 30), [routes]);
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
-      <div style={{ background: C.surface, width: "100%", maxWidth: 480, borderRadius: "20px 20px 0 0", padding: 20, paddingBottom: "calc(20px + env(safe-area-inset-bottom))" }}>
+      <div style={{ background: C.surface, width: "100%", maxWidth: 480, borderRadius: "20px 20px 0 0", padding: 20, paddingBottom: "calc(20px + env(safe-area-inset-bottom))", maxHeight: "92vh", overflowY: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 20, color: C.text }}>{isFuel ? "⛽ Repostaje" : "🧾 Nuevo gasto"}</h2>
+          <h2 style={{ margin: 0, fontSize: 20, color: C.text }}>{kind === "fuel" ? "⛽ Repostaje" : "🧾 Nuevo gasto"}</h2>
           <button onClick={onCancel} style={{ background: "none", border: "none", color: C.textMuted, cursor: "pointer" }}><X size={24} /></button>
         </div>
-        {!isFuel && <><label style={S.label}>Tipo</label><select style={S.input} value={f.tipo} onChange={e => setF({ ...f, tipo: e.target.value })}><option value="toll">Peaje</option><option value="meal">Dieta</option><option value="parking">Parking</option><option value="other">Otro</option></select></>}
+
+        {kind !== "fuel" && (
+          <>
+            <label style={S.label}>Categoría</label>
+            <select style={S.input} value={f.tipo} onChange={e => setF({ ...f, tipo: e.target.value })}>
+              <optgroup label="Gastos de ruta">
+                {CATEGORIES.filter(c => c.scope === "ruta").map(c => <option key={c.key} value={c.key}>{c.emoji} {c.label}</option>)}
+              </optgroup>
+              <optgroup label="Gastos generales">
+                {CATEGORIES.filter(c => c.scope === "general").map(c => <option key={c.key} value={c.key}>{c.emoji} {c.label}</option>)}
+              </optgroup>
+              <optgroup label="Otros">
+                {CATEGORIES.filter(c => c.scope === "ambos").map(c => <option key={c.key} value={c.key}>{c.emoji} {c.label}</option>)}
+              </optgroup>
+            </select>
+          </>
+        )}
+
+        <label style={S.label}>Fecha</label>
+        <input style={S.input} type="date" value={f.fecha} onChange={e => setF({ ...f, fecha: e.target.value })} />
+
         <label style={S.label}>Importe (€)</label>
         <input style={S.input} type="number" inputMode="decimal" value={f.importe} onChange={e => setF({ ...f, importe: e.target.value })} autoFocus />
-        {isFuel && <><label style={S.label}>Litros</label><input style={S.input} type="number" value={f.litros} onChange={e => setF({ ...f, litros: e.target.value })} /><label style={S.label}>Km del odómetro</label><input style={S.input} type="number" value={f.km} onChange={e => setF({ ...f, km: e.target.value })} /></>}
-        <button onClick={() => f.importe && onSave(f)} style={{ ...S.btn(C.success, 56), marginTop: 8 }}>Guardar</button>
+
+        {showFuelFields && (
+          <>
+            <label style={S.label}>Litros</label>
+            <input style={S.input} type="number" inputMode="decimal" value={f.litros} onChange={e => setF({ ...f, litros: e.target.value })} />
+            <label style={S.label}>Km del odómetro</label>
+            <input style={S.input} type="number" value={f.km} onChange={e => setF({ ...f, km: e.target.value })} />
+            {Number(f.litros) > 0 && Number(f.importe) > 0 && (
+              <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 8, marginTop: -4 }}>
+                💡 Precio: <b style={{ color: C.text }}>{(Number(f.importe) / Number(f.litros)).toFixed(3)} €/L</b>
+              </div>
+            )}
+          </>
+        )}
+
+        <label style={S.label}>Motivo / Descripción {cat?.scope === "ruta" ? "(opcional)" : ""}</label>
+        <input style={S.input} value={f.motivo} onChange={e => setF({ ...f, motivo: e.target.value })}
+          placeholder={f.tipo === "tires" ? "p.ej. ruedas traseras Continental" : f.tipo === "maintenance" ? "p.ej. cambio de aceite + filtros" : "Detalle del gasto"} />
+
+        {!defaultRouteId && (
+          <>
+            <label style={S.label}>Asociar a ruta (opcional)</label>
+            <select style={S.input} value={f.routeId} onChange={e => setF({ ...f, routeId: e.target.value })}>
+              <option value="">— Gasto general (sin ruta) —</option>
+              {recentRoutes.map(r => <option key={r.id} value={r.id}>{fmtShort(r.fecha || r.inicio)} · {r.origen} → {r.destino}</option>)}
+            </select>
+          </>
+        )}
+
+        <button onClick={() => valid && onSave({
+          ...f,
+          fecha: new Date(f.fecha).toISOString(),
+          routeId: f.routeId || null,
+        })} disabled={!valid} style={{ ...S.btn(valid ? C.success : "#cbd5e1", 56), marginTop: 8, opacity: valid ? 1 : 0.7 }}>
+          <CheckCircle size={22} />Guardar gasto
+        </button>
       </div>
     </div>
   );
@@ -912,10 +1143,12 @@ function PaymentModal({ C, S, invoice, onCancel, onSave }) {
 
 function InvoicesScreen({ C, S, invoices, clients, settings, hoy, onNew, onOpen }) {
   const [filter, setFilter] = useState("all"); // all | pending | paid | overdue
+  const [period, setPeriod] = useState("all"); // PERIODS keys
   const [q, setQ] = useState("");
   const sorted = [...invoices].sort((a, b) => b.numero.localeCompare(a.numero));
   const withStatus = sorted.map(i => ({ i, st: invoiceStatus(i, hoy, settings?.avisoVencimiento) }));
   const filtered = withStatus.filter(({ i, st }) => {
+    if (!inPeriod(i.fecha, period)) return false;
     if (filter === "pending" && st.estado === "paid") return false;
     if (filter === "paid" && st.estado !== "paid") return false;
     if (filter === "overdue" && st.estado !== "overdue") return false;
@@ -926,13 +1159,55 @@ function InvoicesScreen({ C, S, invoices, clients, settings, hoy, onNew, onOpen 
     }
     return true;
   });
+
+  // Resumen del periodo seleccionado (sobre todas las facturas del periodo, ignorando el filtro estado/búsqueda)
+  const periodSummary = useMemo(() => {
+    const inv = invoices.filter(i => inPeriod(i.fecha, period));
+    let base = 0, iva = 0, irpf = 0, total = 0, cobrado = 0;
+    for (const i of inv) {
+      base += Number(i.base || 0);
+      iva += Number(i.cuota || 0);
+      irpf += Number(i.irpfImporte || 0);
+      total += Number(i.total || 0);
+      cobrado += (i.pagos || []).reduce((s, p) => s + Number(p.importe || 0), 0);
+    }
+    return { num: inv.length, base, iva, irpf, total, cobrado, pendiente: total - cobrado };
+  }, [invoices, period]);
+
   const chip = (key, label) => (
-    <button onClick={() => setFilter(key)} style={{ padding: "6px 12px", fontSize: 12, fontWeight: 600, background: filter === key ? C.primary : C.surfaceAlt, color: filter === key ? "white" : C.text, border: `1px solid ${filter === key ? C.primary : C.border}`, borderRadius: 20, cursor: "pointer" }}>{label}</button>
+    <button onClick={() => setFilter(key)} style={{ padding: "6px 12px", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", background: filter === key ? C.primary : C.surfaceAlt, color: filter === key ? "white" : C.text, border: `1px solid ${filter === key ? C.primary : C.border}`, borderRadius: 20, cursor: "pointer" }}>{label}</button>
   );
   return (
     <>
       <Header C={C} S={S} title="Facturas" />
       <div style={{ padding: "0 16px", marginTop: 8 }}>
+        <PeriodChips C={C} value={period} onChange={setPeriod} />
+      </div>
+
+      {/* Resumen del periodo */}
+      {period !== "all" && periodSummary.num > 0 && (
+        <div style={{ ...S.card, background: C.gradient, color: "white", border: "none" }}>
+          <div style={{ fontSize: 12, opacity: 0.85, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Resumen · {PERIODS.find(p => p.key === period)?.label}
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, marginTop: 4, letterSpacing: -0.5 }}>{eur(periodSummary.base)}</div>
+          <div style={{ fontSize: 11, opacity: 0.9 }}>base imponible · {periodSummary.num} factura{periodSummary.num !== 1 ? "s" : ""}</div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.25)", fontSize: 12 }}>
+            <span>IVA repercutido</span><b>{eur(periodSummary.iva)}</b>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 4 }}>
+            <span>IRPF retenido</span><b>{eur(periodSummary.irpf)}</b>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 4 }}>
+            <span>Total facturado</span><b>{eur(periodSummary.total)}</b>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 4, opacity: 0.95 }}>
+            <span>Cobrado</span><b>{eur(periodSummary.cobrado)}{periodSummary.pendiente > 0.005 ? ` · pendiente ${eur(periodSummary.pendiente)}` : ""}</b>
+          </div>
+        </div>
+      )}
+
+      <div style={{ padding: "0 16px" }}>
         <div style={{ position: "relative" }}>
           <Search size={18} style={{ position: "absolute", left: 14, top: 16, color: C.textMuted }} />
           <input style={{ ...S.input, paddingLeft: 42 }} placeholder="Buscar factura, cliente o NIF…" value={q} onChange={e => setQ(e.target.value)} />
@@ -951,7 +1226,7 @@ function InvoicesScreen({ C, S, invoices, clients, settings, hoy, onNew, onOpen 
             {invoices.length === 0 ? "Aún no has emitido facturas" : "Sin facturas en este filtro"}
           </div>
           <div style={{ color: C.textMuted, fontSize: 13 }}>
-            {invoices.length === 0 ? "Pulsa el botón verde de abajo para emitir tu primera factura a partir de rutas pendientes." : "Cambia el filtro o ajusta la búsqueda."}
+            {invoices.length === 0 ? "Pulsa el botón verde de abajo para emitir tu primera factura a partir de rutas pendientes." : "Cambia el periodo, filtro o búsqueda."}
           </div>
         </div>
       )}
@@ -1184,6 +1459,144 @@ function StatsScreen({ C, S, invoices, expenses, routes, onBack }) {
   );
 }
 
+/* -------- Gastos -------- */
+function ExpensesScreen({ C, S, expenses, routes, settings, onBack, onAdd, onDelete, onEdit }) {
+  const [period, setPeriod] = useState("month");
+  const [q, setQ] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+
+  // Filtro por periodo + texto + categoría
+  const filtered = useMemo(() => {
+    let list = expenses.filter(e => inPeriod(e.fecha, period));
+    if (categoryFilter !== "all") list = list.filter(e => e.tipo === categoryFilter);
+    if (q.trim()) {
+      const s = q.toLowerCase();
+      list = list.filter(e => [e.motivo, e.tipo, CAT_BY_KEY[e.tipo]?.label].filter(Boolean).some(v => v.toLowerCase().includes(s)));
+    }
+    return list.sort((a, b) => (b.fecha || "").localeCompare(a.fecha || ""));
+  }, [expenses, period, q, categoryFilter]);
+
+  // Totales por categoría en el periodo
+  const byCategory = useMemo(() => {
+    const map = {};
+    for (const e of expenses.filter(x => inPeriod(x.fecha, period))) {
+      const k = e.tipo || "other";
+      if (!map[k]) map[k] = 0;
+      map[k] += Number(e.importe || 0);
+    }
+    return Object.entries(map).map(([k, v]) => ({ key: k, total: v, cat: CAT_BY_KEY[k] })).sort((a, b) => b.total - a.total);
+  }, [expenses, period]);
+
+  const totalPeriodo = byCategory.reduce((s, c) => s + c.total, 0);
+  const max = Math.max(...byCategory.map(c => c.total), 1);
+  const periodLabel = PERIODS.find(p => p.key === period)?.label || "Mes";
+
+  // Combustible HOY (atajo informativo solicitado por el usuario)
+  const fuelToday = expenses
+    .filter(e => e.tipo === "fuel" && inPeriod(e.fecha, "today"))
+    .reduce((s, e) => s + Number(e.importe || 0), 0);
+
+  return (
+    <>
+      <Header C={C} S={S} title="Gastos" onBack={onBack} />
+
+      <div style={{ ...S.card, background: C.gradient, color: "white", border: "none" }}>
+        <div style={{ fontSize: 13, opacity: 0.85 }}>Total gastos · {periodLabel}</div>
+        <div style={{ fontSize: 36, fontWeight: 800, marginTop: 4, letterSpacing: -0.5 }}>{eur(totalPeriodo)}</div>
+        <div style={{ fontSize: 12, opacity: 0.85, marginTop: 6 }}>{filtered.length} apunte{filtered.length !== 1 ? "s" : ""}</div>
+      </div>
+
+      <div style={{ padding: "0 16px" }}>
+        <PeriodChips C={C} value={period} onChange={setPeriod} />
+      </div>
+
+      {/* Combustible hoy */}
+      {fuelToday > 0 && period !== "today" && (
+        <div style={{ ...S.card, background: C.warningBg, borderColor: C.warning }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 12, color: C.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>⛽ Combustible hoy</div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: C.text, marginTop: 2 }}>{eur(fuelToday)}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Por categoría */}
+      {byCategory.length > 0 && (
+        <div style={S.card}>
+          <div style={{ fontSize: 13, color: C.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 12 }}>Por categoría</div>
+          {byCategory.map(c => {
+            const colorKey = c.cat?.colorKey || "primary";
+            const color = C[colorKey] || C.primary;
+            return (
+              <div key={c.key} style={{ marginBottom: 10, cursor: "pointer" }} onClick={() => setCategoryFilter(categoryFilter === c.key ? "all" : c.key)}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                  <span style={{ color: C.text, fontWeight: categoryFilter === c.key ? 700 : 500 }}>{c.cat?.emoji || "📌"} {c.cat?.label || c.key}</span>
+                  <span style={{ color: C.text, fontWeight: 700 }}>{eur(c.total)}</span>
+                </div>
+                <div style={{ height: 8, background: C.surfaceAlt, borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ width: `${(c.total / max) * 100}%`, height: "100%", background: color, borderRadius: 4 }} />
+                </div>
+              </div>
+            );
+          })}
+          {categoryFilter !== "all" && (
+            <button onClick={() => setCategoryFilter("all")} style={{ marginTop: 4, background: "none", border: "none", color: C.primary, fontSize: 12, cursor: "pointer", fontWeight: 600 }}>← Limpiar filtro</button>
+          )}
+        </div>
+      )}
+
+      {/* Buscador */}
+      <div style={{ padding: "0 16px", marginTop: 4 }}>
+        <div style={{ position: "relative" }}>
+          <Search size={18} style={{ position: "absolute", left: 14, top: 16, color: C.textMuted }} />
+          <input style={{ ...S.input, paddingLeft: 42 }} placeholder="Buscar gasto…" value={q} onChange={e => setQ(e.target.value)} />
+        </div>
+      </div>
+
+      {/* Lista detallada */}
+      {filtered.length === 0 ? (
+        <div style={{ ...S.card, textAlign: "center", padding: 32 }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>🧾</div>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 15, marginBottom: 4 }}>Sin gastos en este periodo</div>
+          <div style={{ color: C.textMuted, fontSize: 13 }}>Pulsa el botón verde de abajo para apuntar uno.</div>
+        </div>
+      ) : (
+        filtered.map(e => {
+          const cat = CAT_BY_KEY[e.tipo];
+          const route = e.routeId ? routes.find(r => r.id === e.routeId) : null;
+          return (
+            <div key={e.id} style={{ ...S.card, cursor: "pointer" }} onClick={() => onEdit && onEdit(e)}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: C.text }}>
+                    {cat?.emoji || "📌"} {cat?.label || e.tipo}
+                    {e.litros ? <span style={{ fontSize: 12, color: C.textMuted, fontWeight: 400 }}> · {e.litros} L</span> : null}
+                  </div>
+                  {e.motivo && <div style={{ fontSize: 13, color: C.text, marginTop: 4 }}><Highlight text={e.motivo} query={q} color={C.primary} /></div>}
+                  <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>
+                    {fmtDate(e.fecha)}
+                    {route ? ` · ${route.origen} → ${route.destino}` : " · gasto general"}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                  <b style={{ fontSize: 16, color: C.danger }}>-{eur(e.importe)}</b>
+                  <button onClick={(ev) => { ev.stopPropagation(); onDelete(e.id); }} style={{ background: "none", border: "none", color: C.textLight, cursor: "pointer", padding: 4 }}><Trash2 size={16} /></button>
+                </div>
+              </div>
+            </div>
+          );
+        })
+      )}
+
+      <div style={S.thumbAbove}><div style={S.thumbInner}>
+        <button onClick={onAdd} style={S.btnGradient()}><Plus size={24} />Apuntar nuevo gasto</button>
+      </div></div>
+    </>
+  );
+}
+
 /* -------- Clientes / facturación -------- */
 function PickClientScreen({ C, S, clients, routes, onBack, onPick }) {
   const [q, setQ] = useState("");
@@ -1391,6 +1804,13 @@ function SettingsScreen({ C, S, settings, tema, onSave, onClients, onExport, onI
         <div style={{ fontSize: 12, color: C.textLight, textTransform: "uppercase", marginTop: 16, marginBottom: 4, fontWeight: 700 }}>Cobros</div>
         <label style={S.label}>Días para vencimiento (al emitir factura)</label><input style={S.input} type="number" value={f.diasVencimiento ?? 60} onChange={e => setF({ ...f, diasVencimiento: Number(e.target.value) })} />
         <label style={S.label}>Avisar X días antes del vencimiento</label><input style={S.input} type="number" value={f.avisoVencimiento ?? 7} onChange={e => setF({ ...f, avisoVencimiento: Number(e.target.value) })} />
+
+        <div style={{ fontSize: 12, color: C.textLight, textTransform: "uppercase", marginTop: 16, marginBottom: 4, fontWeight: 700 }}>Combustible</div>
+        <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 8 }}>
+          Estos valores se usan para estimar el coste de combustible al crear una ruta. Si tienes repostajes registrados, la app usa tu histórico real y estos valores solo son fallback.
+        </div>
+        <label style={S.label}>Precio por defecto (€/L)</label><input style={S.input} type="number" step="0.001" value={f.precioGasoil ?? 1.45} onChange={e => setF({ ...f, precioGasoil: Number(e.target.value) })} />
+        <label style={S.label}>Consumo por defecto (L/100km)</label><input style={S.input} type="number" step="0.1" value={f.consumoEstimado ?? 30} onChange={e => setF({ ...f, consumoEstimado: Number(e.target.value) })} />
 
         <div style={{ fontSize: 12, color: C.textLight, textTransform: "uppercase", marginTop: 16, marginBottom: 4, fontWeight: 700 }}>Alertas</div>
         <label style={S.label}>Margen mínimo (%)</label><input style={S.input} type="number" value={f.margenAlerta} onChange={e => setF({ ...f, margenAlerta: Number(e.target.value) })} />

@@ -53,11 +53,16 @@ const DEFAULT_SETTINGS = {
   formaPago: "Transferencia",
   observaciones: "Se adjuntan albaranes sellados.",
   registro: "",
-  diasVencimiento: 30,
+  // Cobros
+  diasVencimiento: 60,        // días estándar para vencimiento de factura
+  avisoVencimiento: 7,        // avisa cuando faltan X días para vencer
+  // Combustible (estimación de coste por ruta)
+  precioGasoil: 1.45,         // €/L por defecto si no hay histórico
+  consumoEstimado: 30,        // L/100km por defecto si no hay histórico
   // Alertas
   margenAlerta: 20,
   // UI
-  theme: "light", // "light" | "dark"
+  tema: "light",              // "light" | "dark"
 };
 
 export const dataApi = {
